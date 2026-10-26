@@ -1,5 +1,8 @@
 # muonium
 
+[![PyPI](https://img.shields.io/pypi/v/muonium)](https://pypi.org/project/muonium/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE.md)
+
 A performant, distributed-ready implementation of the **Muon** optimizer — and a base for
 Muon research — built on PyTorch
 [`DTensor`](https://docs.pytorch.org/docs/stable/distributed.tensor.html).
@@ -21,8 +24,6 @@ Formerly published as `dtensor-muon`.
 - **Performant.** Compiled update kernels, a batched `foreach` driver, a fused Triton
   Gram-matrix kernel inside Newton-Schulz, and optional 4-bit/8-bit/fp8 optimizer state
   (`MuonLP`).
-
-This is an open-sourcing of work done at Dream3D. This was implemented without AI tools originally. When copying the source over, Claude Fable 5 was used to audit the codebase, write tests and documentation, and fix a bug. Claude is tagged on all the commits he contributed to :)
 
 ## What is Muon?
 
