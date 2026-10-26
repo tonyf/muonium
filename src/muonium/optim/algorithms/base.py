@@ -2,7 +2,7 @@
 import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, ClassVar, Literal, cast
+from typing import Any, ClassVar, Literal, TypeVar, cast
 
 import torch
 from torch import Tensor
@@ -271,7 +271,10 @@ class MuonAlgorithm(ABC):
 _REGISTRY: dict[str, MuonAlgorithm] = {}
 
 
-def register_muon_algorithm(cls: type[MuonAlgorithm]) -> type[MuonAlgorithm]:
+_AlgorithmT = TypeVar("_AlgorithmT", bound=MuonAlgorithm)
+
+
+def register_muon_algorithm(cls: type[_AlgorithmT]) -> type[_AlgorithmT]:
     """Register a :class:`MuonAlgorithm` subclass under ``cls.name``.
 
     Usable as a class decorator. Third-party packages can register their own

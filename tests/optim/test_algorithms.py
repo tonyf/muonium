@@ -69,7 +69,7 @@ class _SignDescent(MuonAlgorithm):
 
 
 def test_builtin_algorithms_are_registered():
-    assert {"muon", "normuon", "muonh", "adamh"}.issubset(set(registered_algorithms()))
+    assert {"muon", "normuon", "muonh", "normuonh", "adamh"}.issubset(set(registered_algorithms()))
 
 
 def test_get_algorithm_unknown_name_raises_with_known_names():
@@ -572,3 +572,34 @@ def test_adamh_matches_bias_corrected_reference_and_keeps_norm(shape):
     torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(p.detach().norm(dim=(-2, -1)), init_norm)
     assert set(optimizer.state[p]) == {"step", "lr_ratio", "exp_avg", "exp_avg_sq"}
+
+
+@pytest.mark.parametrize("shape", [(4, 3), (2, 3, 4)])
+def test_normuonh_matches_reference_and_keeps_norm(monkeypatch, shape):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(shape))
+    ref_p = p.detach().clone()
+    buf, v = torch.zeros_like(ref_p), torch.zeros_like(ref_p[..., :1])
+    init_norm = ref_p.norm(dim=(-2, -1))
+    lr, momentum, beta2 = 0.1, 0.5, 0.9
+    optimizer = Muon(
+        [{"params": [p], "algorithm": "normuonh", "muon_beta2": beta2}],
+        lr=lr, wd=0.1, momentum=momentum, nesterov=False, foreach=False,
+    )
+
+    for step in range(3):
+        grad = torch.randn(shape, generator=torch.Generator().manual_seed(100 + step))
+        p.grad = grad.clone()
+        optimizer.step()
+        # NorMuon direction (identity zeropower), then the Hyperball step.
+        buf.mul_(momentum).add_(grad)
+        v.lerp_((buf * buf).mean(dim=-1, keepdim=True), 1 - beta2)
+        u = buf / (v.sqrt() + 1e-8)
+        radius = ref_p.norm(dim=(-2, -1), keepdim=True)
+        w = ref_p - lr * radius * u / u.norm(dim=(-2, -1), keepdim=True)
+        ref_p.copy_(radius * w / w.norm(dim=(-2, -1), keepdim=True))
+
+    torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(p.detach().norm(dim=(-2, -1)), init_norm)
+    torch.testing.assert_close(optimizer.state[p]["variance_neuron"], v, rtol=1e-5, atol=1e-7)

@@ -17,7 +17,7 @@ from .base import (
 )
 
 # Importing these modules registers the built-in algorithms.
-from .hyperball import AdamHyperball, MuonHyperball
+from .hyperball import AdamHyperball, MuonHyperball, NorMuonHyperball
 from .muon import MuonBaseline
 from .normuon import NorMuon
 
@@ -28,6 +28,7 @@ __all__ = [
     "MuonBaseline",
     "MuonHyperball",
     "NorMuon",
+    "NorMuonHyperball",
     "get_algorithm",
     "orthogonalize_batch",
     "orthogonalize_single",

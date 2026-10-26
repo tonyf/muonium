@@ -1,4 +1,4 @@
-"""Hyperball optimization: MuonH and AdamH.
+"""Hyperball optimization: MuonH, NorMuonH and AdamH.
 
 Implements the Hyperball wrapper from Wen, Dang, Lyu, Ma & Liang, "Fantastic
 Pretraining Optimizers and Where to Find Them II: Hyperball Optimization" (2026),
@@ -20,6 +20,7 @@ from .base import (
     orthogonalize_single,
     register_muon_algorithm,
 )
+from .normuon import NorMuon, _normuon_normalize
 
 
 def _matrix_sum(x: Tensor) -> Tensor:
@@ -64,6 +65,16 @@ class MuonHyperball(MuonAlgorithm):
 
     name = "muonh"
 
+    def direction(
+        self,
+        u: Tensor,
+        state: dict[str, Tensor],
+        split_sizes: tuple[int, ...] | None,
+        **opts,
+    ) -> Tensor:
+        """Hook between orthogonalization and the Hyperball step; identity for MuonH."""
+        return u
+
     def update(
         self,
         param: Tensor,
@@ -102,6 +113,7 @@ class MuonHyperball(MuonAlgorithm):
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
         )
+        u = self.direction(u, state, split_sizes, **opts)
         p = param.to(torch.float32).view_as(grad)
         param.copy_(_hyperball_step(p, u, lr).view_as(param))
 
@@ -146,8 +158,42 @@ class MuonHyperball(MuonAlgorithm):
 
         # Per tensor, like NorMuon's normalization: a few reductions that compile
         # fuses, and placement-agnostic for DTensor inputs.
-        for p, g_, u_ in zip(params, g, u, strict=True):
+        for i, (p, g_, u_) in enumerate(zip(params, g, u, strict=True)):
+            u_ = self.direction(
+                u_, {key: buffers[i] for key, buffers in state.items()}, split_sizes, **opts
+            )
             p.copy_(_hyperball_step(p.view_as(g_), u_, lr).view_as(p))
+
+
+@register_muon_algorithm
+class NorMuonHyperball(MuonHyperball):
+    """NorMuonH: NorMuon wrapped in Hyperball.
+
+    The NorMuon direction (https://arxiv.org/abs/2510.05491: orthogonalize, then
+    normalize each row by a per-neuron second-moment EMA) followed by the Hyperball
+    step (https://arxiv.org/abs/2606.16899). NorMuon's Frobenius-norm rescale is
+    cancelled by Hyperball's unit normalization, so only the row reweighting
+    survives. Same caveats as :class:`MuonHyperball`.
+    """
+
+    name = "normuonh"
+    options = NorMuon.options
+    state_spec = NorMuon.state_spec
+
+    def direction(
+        self,
+        u: Tensor,
+        state: dict[str, Tensor],
+        split_sizes: tuple[int, ...] | None,
+        muon_beta2: float = 0.95,
+        **opts,
+    ) -> Tensor:
+        variance_neuron = state["variance_neuron"]
+        u, v_new = _normuon_normalize(
+            u, variance_neuron.to(torch.float32), muon_beta2, split_sizes
+        )
+        variance_neuron.copy_(v_new)
+        return u
 
 
 @register_muon_algorithm
