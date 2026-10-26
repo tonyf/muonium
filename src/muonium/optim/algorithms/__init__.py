@@ -17,13 +17,16 @@ from .base import (
 )
 
 # Importing these modules registers the built-in algorithms.
+from .hyperball import AdamHyperball, MuonHyperball
 from .muon import MuonBaseline
 from .normuon import NorMuon
 
 __all__ = [
+    "AdamHyperball",
     "BufferSpec",
     "MuonAlgorithm",
     "MuonBaseline",
+    "MuonHyperball",
     "NorMuon",
     "get_algorithm",
     "orthogonalize_batch",

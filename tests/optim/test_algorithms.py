@@ -69,7 +69,7 @@ class _SignDescent(MuonAlgorithm):
 
 
 def test_builtin_algorithms_are_registered():
-    assert {"muon", "normuon"}.issubset(set(registered_algorithms()))
+    assert {"muon", "normuon", "muonh", "adamh"}.issubset(set(registered_algorithms()))
 
 
 def test_get_algorithm_unknown_name_raises_with_known_names():
@@ -502,3 +502,73 @@ def test_normuon_foreach_dtensor_matches_single_process() -> None:
     run_distributed(
         _normuon_foreach_dtensor_worker, world_size=2, backend="nccl", device_type="cuda"
     )
+
+
+# --- Hyperball (MuonH / AdamH) numerics --------------------------------------------------------------
+
+
+def _muonh_reference_step(p, g, buf, *, lr, momentum, nesterov):
+    """Transcription of MuonH (arxiv.org/abs/2606.16899, Algorithm 1) with identity zeropower."""
+    buf.mul_(momentum).add_(g)
+    u = g + momentum * buf if nesterov else buf.clone()
+    radius = p.norm(dim=(-2, -1), keepdim=True)
+    w = p - lr * radius * u / u.norm(dim=(-2, -1), keepdim=True)
+    p.copy_(radius * w / w.norm(dim=(-2, -1), keepdim=True))
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+@pytest.mark.parametrize("shape", [(4, 3), (2, 3, 4)])
+def test_muonh_matches_reference_and_keeps_norm(monkeypatch, shape, foreach):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    monkeypatch.setattr(
+        algo_base, "foreach_zeropower", lambda gs, **_: [g.clone() for g in gs]
+    )
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(shape))
+    ref_p = p.detach().clone()
+    ref_buf = torch.zeros_like(ref_p)
+    init_norm = ref_p.norm(dim=(-2, -1))
+    optimizer = Muon(
+        [{"params": [p], "algorithm": "muonh"}],
+        lr=0.1, wd=0.1, momentum=0.5, nesterov=True, foreach=foreach,
+    )
+
+    for step in range(3):
+        grad = torch.randn(shape, generator=torch.Generator().manual_seed(100 + step))
+        p.grad = grad.clone()
+        optimizer.step()
+        _muonh_reference_step(ref_p, grad.clone(), ref_buf, lr=0.1, momentum=0.5,
+                                  nesterov=True)
+
+    torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(p.detach().norm(dim=(-2, -1)), init_norm)
+
+
+@pytest.mark.parametrize("shape", [(4, 3), (2, 3, 4)])
+def test_adamh_matches_bias_corrected_reference_and_keeps_norm(shape):
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(shape))
+    ref_p = p.detach().clone()
+    m, v = torch.zeros_like(ref_p), torch.zeros_like(ref_p)
+    init_norm = ref_p.norm(dim=(-2, -1))
+    beta1, beta2, lr = 0.9, 0.99, 0.1
+    optimizer = Muon(
+        [{"params": [p], "algorithm": "adamh", "beta2": beta2}],
+        lr=lr, wd=0.1, momentum=beta1, foreach=False,
+    )
+
+    for step in range(1, 4):
+        grad = torch.randn(shape, generator=torch.Generator().manual_seed(100 + step))
+        p.grad = grad.clone()
+        optimizer.step()
+        # Textbook bias-corrected Adam direction; the optimizer skips the correction.
+        m.lerp_(grad, 1 - beta1)
+        v.lerp_(grad * grad, 1 - beta2)
+        u = (m / (1 - beta1**step)) / ((v / (1 - beta2**step)).sqrt() + 1e-8)
+        radius = ref_p.norm(dim=(-2, -1), keepdim=True)
+        w = ref_p - lr * radius * u / u.norm(dim=(-2, -1), keepdim=True)
+        ref_p.copy_(radius * w / w.norm(dim=(-2, -1), keepdim=True))
+
+    torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(p.detach().norm(dim=(-2, -1)), init_norm)
+    assert set(optimizer.state[p]) == {"step", "lr_ratio", "exp_avg", "exp_avg_sq"}
