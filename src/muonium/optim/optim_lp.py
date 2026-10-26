@@ -106,9 +106,9 @@ class MuonLP(Muon):
 
         Grad-shaped buffers (e.g. the momentum buffer) are built from the
         parameter via ``_new_buffer`` — quantized when eligible and re-wrapped as
-        DTensors. Row-shaped buffers (``like="grad_rows"``) are tiny (one value
-        per neuron), far below the quantization threshold, so they use the plain
-        fp32 allocation.
+        DTensors. Row/column-shaped buffers (``like="grad_rows"`` / ``"grad_cols"``)
+        are tiny (one value per row or column), far below the quantization
+        threshold, so they use the plain fp32 allocation.
         """
         if spec.like == "grad":
             return self._new_buffer(p, signed=spec.signed)

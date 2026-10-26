@@ -38,7 +38,7 @@ they spawn a small **gloo** world on CPU and run anywhere.
 Adam. Each param-group dict carries an `"algorithm"` key: `"adam"`/`"adamw"` take the special-cased
 Adam path (`_step_adam_group` → `torch.optim.adam.adam`, the upstream fused kernel); every other
 name is resolved through the **algorithm registry** in `optim/algorithms/` (`"muon"` is the
-default; `"normuon"`, `"muonh"`, `"normuonh"`, and `"adamh"` (Hyperball, arXiv 2606.16899) are built in; third parties add variants with `@register_muon_algorithm`).
+default; `"normuon"`, `"muon2"`/`"muon2f"` (Muon², arXiv 2604.09967), and `"muonh"`, `"normuonh"`, `"adamh"` (Hyperball, arXiv 2606.16899) are built in; third parties add variants with `@register_muon_algorithm`).
 The constructor normalizes every group through `_build_muon_group` / `_build_adam_group`, which
 stamp a `use_muon` flag and resolve each option (lr, wd, momentum, …) with a per-group override
 falling back to the constructor default; variant-specific options (declared in
@@ -69,7 +69,7 @@ for a param group is a state-breaking change.
 
 `optim/algorithms/` holds `MuonAlgorithm` strategy objects: `name`, `options` (variant
 hyperparameter defaults), `state_spec` (declarative per-param buffers via `BufferSpec`,
-`like="grad"|"grad_rows"`), a per-tensor fp32 `update` reference, and an optional batched
+`like="grad"|"grad_rows"|"grad_cols"`), a per-tensor fp32 `update` reference, and an optional batched
 `foreach_update` (defaults to looping `update`). Algorithms never touch DTensor logic directly —
 they call `orthogonalize_single` / `orthogonalize_batch` from `algorithms/base.py`, which wrap
 `zeropower`/`foreach_zeropower`, pick the FSDP fast path, and implement the `split_sizes`
@@ -87,7 +87,7 @@ The same group key drives the base Optimizer's foreach `zero_grad`, as in torch.
 
 - **`MuonLP`** (`optim/optim_lp.py`, needs the `lp` extra) overrides `_new_state_buffer` so any
   algorithm's `like="grad"` buffers go through `_new_buffer` into a quantized torchao subclass
-  (`grad_rows` buffers are tiny and stay fp32). The concrete classes `Muon8bit`, `Muon4bit`,
+  (`grad_rows`/`grad_cols` buffers are tiny and stay fp32). The concrete classes `Muon8bit`, `Muon4bit`,
   `MuonFp8` only override `_subclass_zeros`. Buffers are quantized only when `numel() >= 4096`
   and divisible by `block_size`; DTensor params get the quantized local tensor re-wrapped via
   `DTensor.from_local`. Defaults `foreach=False`: the quantized subclasses don't implement the

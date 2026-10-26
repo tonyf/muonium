@@ -370,7 +370,11 @@ class Muon(torch.optim.Optimizer):
     def _new_state_buffer(self, p: Tensor, grad: Tensor, spec: BufferSpec) -> Tensor:
         """Allocate one per-parameter state buffer declared by an algorithm's
         ``state_spec``. Overridden by low-precision optimizers to quantize."""
-        reference = grad if spec.like == "grad" else grad[..., :1]
+        reference = {
+            "grad": grad,
+            "grad_rows": grad[..., :1],
+            "grad_cols": grad[..., :1, :],
+        }[spec.like]
         return torch.zeros_like(
             reference, dtype=torch.float32, memory_format=torch.preserve_format
         )
