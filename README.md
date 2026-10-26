@@ -1,28 +1,94 @@
 # muonium
 
-A performant, distributed-ready implementation of the **Muon** optimizer — and a base for
-Muon research — built on PyTorch
-[`DTensor`](https://docs.pytorch.org/docs/stable/distributed.tensor.html).
-Formerly published as `dtensor-muon`.
+[![PyPI](https://img.shields.io/pypi/v/muonium)](https://pypi.org/project/muonium/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE.md)
 
-- **Distributed by construction.** Orthogonalization runs across sharded parameters
-  (FSDP / tensor-parallel meshes), with a collective-free fast path when parameters are
-  sharded along dim 0 (the FSDP layout). For expert-parallel MoEs, orthogonalization runs
-  directly on the local sharded parameters with no collectives at all.
-- **A base for Muon variants.** The update rule is pluggable per param group: baseline
-  Muon, [NorMuon](https://arxiv.org/abs/2510.05491), and Hyperball's
-  [MuonH/NorMuonH/AdamH](https://arxiv.org/abs/2606.16899) are built in, and third parties
-  register their own variants with a few dozen lines — the optimizer supplies state
-  allocation, batching, CPU offload, DTensor handling, and `torch.compile` around your
-  math. Variant names persist in checkpoints.
-- **One optimizer for the whole model.** Weight matrices go to a Muon-family algorithm;
-  norms, biases, embeddings, and the LM head fall back to PyTorch's fused Adam/AdamW —
-  all selected per param group on a single optimizer instance.
-- **Performant.** Compiled update kernels, a batched `foreach` driver, a fused Triton
-  Gram-matrix kernel inside Newton-Schulz, and optional 4-bit/8-bit/fp8 optimizer state
-  (`MuonLP`).
+**A base for Muon research that stays fast at scale.**
 
-This is an open-sourcing of work done at Dream3D. This was implemented without AI tools originally. When copying the source over, Claude Fable 5 was used to audit the codebase, write tests and documentation, and fix a bug. Claude is tagged on all the commits he contributed to :)
+Write a new Muon variant as a few dozen lines of fp32 math. muonium runs it batched,
+compiled, on FSDP2-sharded
+[`DTensor`](https://docs.pytorch.org/docs/stable/distributed.tensor.html) parameters, and
+with optional low-precision state. Muon, [NorMuon](https://arxiv.org/abs/2510.05491) and
+[Hyperball](https://arxiv.org/abs/2606.16899) (MuonH / NorMuonH / AdamH) are built in, and
+switching between them is one string. The same optimizer instance handles the rest of the
+model with fused AdamW.
+
+```python
+from torch.distributed.fsdp import fully_shard
+from muonium import Muon
+
+model = ...                      # any nn.Module
+for block in model.layers:
+    fully_shard(block)
+fully_shard(model)
+
+def is_matrix(name, p):
+    return p.ndim >= 2 and "embed" not in name and "lm_head" not in name
+
+params = list(model.named_parameters())
+optimizer = Muon(
+    [
+        {"params": [p for n, p in params if is_matrix(n, p)], "algorithm": "normuon"},
+        {"params": [p for n, p in params if not is_matrix(n, p)], "algorithm": "adamw"},
+    ],
+    lr=1e-3,
+)
+```
+
+Swap `"normuon"` for `"muon"`, `"muonh"`, `"normuonh"`, … — or
+[register your own](#registering-your-own-variant).
+
+## Why muonium
+
+### Your variant is just the math
+
+A variant is a `MuonAlgorithm`: hyperparameter defaults, a declarative `state_spec` of
+per-param buffers, and an fp32 `update`. Everything around the math is shared, so every
+built-in and third-party variant gets it for free:
+
+- state allocation from `state_spec`, including 4-bit / 8-bit / fp8 quantized state under
+  `MuonLP`
+- batching by (device, dtype, shape) with `torch._foreach_*` ops
+- CPU-offloaded params moved to CUDA per batch and back
+- DTensor orthogonalization through the three paths below
+- a lazily compiled `torch.compile` kernel per algorithm
+- checkpoints that store the algorithm name, so `load_state_dict` restores the right variant
+
+Every built-in variant lives in one file on top of this (baseline Muon is ~140 lines), and
+[yours can be too](#registering-your-own-variant).
+
+### Fast where it counts: sharded orthogonalization
+
+Muon's expensive step is orthogonalizing every weight matrix, and done naively that means
+gathering every full matrix on every rank. muonium has three DTensor paths and picks the
+cheapest one that applies:
+
+- **Collective-free fast path.** 3D weights sharded only on dim 0 (MoE experts, stacked
+  layers under FSDP) are orthogonalized directly on each rank's local shard. No
+  communication at all: **2.09× faster than a single device** on 2 GPUs
+  ([Benchmarks](#benchmarks)).
+- **Batched redistribute.** Same-shaped params are stacked and resharded so each rank
+  orthogonalizes its slice of the batch, then sent back to their original placements
+  (**1.28×**).
+- **Single tensor.** Anything else is gathered, orthogonalized, and redistributed back to
+  whatever placement it came from.
+
+### Kernels
+
+- A fused, autotuned **Triton Gram-matrix kernel** for Newton-Schulz: it computes only
+  the upper triangle of `X Xᵀ` and mirrors it.
+- **[Polar Express](https://arxiv.org/pdf/2505.16932)** by default, whose precomputed
+  coefficients converge faster than classic Newton-Schulz.
+- Orthogonalization in bfloat16; momentum, state, and parameter updates in fp32.
+
+### One optimizer for the whole model
+
+- Norms, biases, embeddings and the LM head go to PyTorch's fused Adam/AdamW in the same
+  optimizer instance, selected per param group.
+- `split_sizes` orthogonalizes the row blocks of a fused weight (e.g. QKV) independently,
+  so you keep the single wide GEMM and still get the update separate per-block weights
+  would receive.
+- Shape-aware learning-rate scaling and cautious weight decay by default.
 
 ## What is Muon?
 
