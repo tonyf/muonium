@@ -46,10 +46,11 @@ class BufferSpec:
 
     ``like="grad"`` allocates an fp32 buffer shaped like the (possibly flattened)
     gradient; ``like="grad_rows"`` shapes it like ``grad[..., :1]`` (one value per
-    row/neuron). ``signed`` is consumed by quantized-state optimizers (``MuonLP``).
+    row/neuron) and ``like="grad_cols"`` like ``grad[..., :1, :]`` (one per column).
+    ``signed`` is consumed by quantized-state optimizers (``MuonLP``).
     """
 
-    like: Literal["grad", "grad_rows"]
+    like: Literal["grad", "grad_rows", "grad_cols"]
     signed: bool = True
 
 

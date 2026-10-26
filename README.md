@@ -10,8 +10,8 @@ Formerly published as `dtensor-muon`.
   sharded along dim 0 (the FSDP layout). For expert-parallel MoEs, orthogonalization runs
   directly on the local sharded parameters with no collectives at all.
 - **A base for Muon variants.** The update rule is pluggable per param group: baseline
-  Muon, [NorMuon](https://arxiv.org/abs/2510.05491), and Hyperball's
-  [MuonH/NorMuonH/AdamH](https://arxiv.org/abs/2606.16899) are built in, and third parties
+  Muon, [NorMuon](https://arxiv.org/abs/2510.05491), [Muon²/Muon²-F](https://arxiv.org/abs/2604.09967),
+  and Hyperball's [MuonH/NorMuonH/AdamH](https://arxiv.org/abs/2606.16899) are built in, and third parties
   register their own variants with a few dozen lines — the optimizer supplies state
   allocation, batching, CPU offload, DTensor handling, and `torch.compile` around your
   math. Variant names persist in checkpoints.
@@ -131,6 +131,8 @@ The `"algorithm"` key selects the update rule per param group. `"muon"` (default
 | Algorithm | Extra group options | Description |
 | --- | --- | --- |
 | `"normuon"` | `muon_beta2` (`0.95`) | [NorMuon](https://arxiv.org/abs/2510.05491): normalizes the orthogonalized update by a per-neuron second-moment EMA, then rescales to preserve its Frobenius norm. Adds a `variance_neuron` state buffer (one value per row). |
+| `"muon2"` | `muon_beta2` (`0.95`), `muon_eps` (`1e-8`) | [Muon²](https://arxiv.org/abs/2604.09967) (Liu et al., 2026): divides the momentum elementwise by `sqrt(V) + eps`, with `V` an EMA of the squared gradient, before orthogonalization. The better-conditioned input lets Newton-Schulz use fewer steps (the paper uses `ns_steps=3`). Adds a grad-sized `exp_avg_sq` buffer. |
+| `"muon2f"` | same as `"muon2"` | Muon²-F, from the same paper: `V` is stored Adafactor-style as row and column EMAs (`exp_avg_sq_row` / `exp_avg_sq_col`) and rebuilt as `r cᵀ / Σr`, so the extra state is `N + M` values per matrix. |
 | `"muonh"` | — | MuonH, from [Hyperball Optimization](https://arxiv.org/abs/2606.16899) (Wen et al., 2026): normalizes the orthogonalized update to unit Frobenius norm, steps by `lr * ‖W‖_F`, then projects each matrix back to its initial norm. `lr` is an angular step size; `wd` is ignored (the projection replaces it). Don't use with zero-initialized weights. |
 | `"normuonh"` | `muon_beta2` (`0.95`) | NorMuonH: the [NorMuon](https://arxiv.org/abs/2510.05491) direction (orthogonalize, then per-neuron normalization) followed by the [Hyperball](https://arxiv.org/abs/2606.16899) step. Same caveats as `"muonh"`; adds NorMuon's `variance_neuron` buffer. |
 | `"adamh"` | `beta2` (`0.95`), `eps` (`1e-8`) | AdamH, from the same [paper](https://arxiv.org/abs/2606.16899): the same Hyperball projection around the Adam direction `m / (√v + eps)` instead of the orthogonalized update; `momentum` is beta1. Adds `exp_avg` / `exp_avg_sq` state buffers. Like `"muonh"`, it is for weight matrices; embeddings, norms and scalars stay on `"adam"`/`"adamw"`, as in the paper. |

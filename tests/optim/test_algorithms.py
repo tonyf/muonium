@@ -69,7 +69,7 @@ class _SignDescent(MuonAlgorithm):
 
 
 def test_builtin_algorithms_are_registered():
-    assert {"muon", "normuon", "muonh", "normuonh", "adamh"}.issubset(set(registered_algorithms()))
+    assert {"muon", "normuon", "muon2", "muon2f", "muonh", "normuonh", "adamh"}.issubset(set(registered_algorithms()))
 
 
 def test_get_algorithm_unknown_name_raises_with_known_names():
@@ -603,3 +603,87 @@ def test_normuonh_matches_reference_and_keeps_norm(monkeypatch, shape):
     torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(p.detach().norm(dim=(-2, -1)), init_norm)
     torch.testing.assert_close(optimizer.state[p]["variance_neuron"], v, rtol=1e-5, atol=1e-7)
+
+
+# --- Muon² / Muon²-F numerics (arxiv.org/abs/2604.09967) ----------------------------
+
+
+def _muon2_reference_v(g, state, *, factored, beta2):
+    """Algorithm 1 (elementwise V) or Algorithm 2 (factored V = r c^T / sum(r))."""
+    if not factored:
+        state["v"].lerp_(g * g, 1 - beta2)
+        return state["v"]
+    state["r"].lerp_((g * g).sum(dim=-1, keepdim=True), 1 - beta2)
+    state["c"].lerp_((g * g).sum(dim=-2, keepdim=True), 1 - beta2)
+    return state["r"] @ state["c"] / state["r"].sum(dim=(-2, -1), keepdim=True)
+
+
+@pytest.mark.parametrize("factored", [False, True])
+@pytest.mark.parametrize("shape", [(4, 3), (3, 4), (2, 3, 4)])
+def test_muon2_matches_reference_transcription(monkeypatch, shape, factored):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(shape))
+    ref_p = p.detach().clone()
+    buf = torch.zeros_like(ref_p)
+    ref_state = {
+        "v": torch.zeros_like(ref_p),
+        "r": torch.zeros_like(ref_p[..., :1]),
+        "c": torch.zeros_like(ref_p[..., :1, :]),
+    }
+    lr, wd, momentum, beta2, eps = 0.1, 0.1, 0.5, 0.9, 1e-8
+    algorithm = "muon2f" if factored else "muon2"
+    optimizer = Muon(
+        [{"params": [p], "algorithm": algorithm, "muon_beta2": beta2}],
+        lr=lr, wd=wd, momentum=momentum, nesterov=True, use_cautious_wd=False,
+        foreach=False,
+    )
+
+    for step in range(3):
+        grad = torch.randn(shape, generator=torch.Generator().manual_seed(100 + step))
+        p.grad = grad.clone()
+        optimizer.step()
+        buf.mul_(momentum).add_(grad)
+        m = grad + momentum * buf
+        v = _muon2_reference_v(grad, ref_state, factored=factored, beta2=beta2)
+        u = m / (v.sqrt() + eps) + wd * ref_p
+        ref_p.sub_(math.sqrt(max(1.0, shape[-2] / shape[-1])) * lr * u)
+
+    torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
+    state = optimizer.state[p]
+    if factored:
+        assert state["exp_avg_sq_row"].shape == (*shape[:-1], 1)
+        assert state["exp_avg_sq_col"].shape == (*shape[:-2], 1, shape[-1])
+        assert "exp_avg_sq" not in state
+    else:
+        torch.testing.assert_close(state["exp_avg_sq"], ref_state["v"])
+
+
+def _muon2_dtensor_worker(rank: int, world_size: int, algorithm: str, shard_dim: int) -> None:
+    # Identity zeropower: the real kernels are CUDA-only (Triton gram), and this
+    # checks the sharded preconditioner and factored row/col sums, not the kernel.
+    setattr(algo_base, "zeropower", lambda g, **_: g)
+    mesh = init_device_mesh("cpu", (world_size,))
+    torch.manual_seed(0)
+    full = torch.randn(8, 6)
+    grads = [torch.randn(8, 6) for _ in range(2)]
+    kwargs: dict[str, Any] = dict(lr=0.1, wd=0.1, momentum=0.5, foreach=False)
+    group = lambda ps: [{"params": ps, "algorithm": algorithm}]
+
+    dp = nn.Parameter(distribute_tensor(full.clone(), mesh, [Shard(shard_dim)]))
+    rp = nn.Parameter(full.clone())
+    dopt, ropt = Muon(group([dp]), **kwargs), Muon(group([rp]), **kwargs)
+    for g in grads:
+        dp.grad = distribute_tensor(g.clone(), mesh, [Shard(shard_dim)])
+        rp.grad = g.clone()
+        dopt.step()
+        ropt.step()
+
+    assert isinstance(dp, DTensor)
+    torch.testing.assert_close(dp.full_tensor(), rp.detach(), rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("shard_dim", [0, 1])
+@pytest.mark.parametrize("algorithm", ["muon2", "muon2f"])
+def test_muon2_dtensor_matches_single_process_cpu_gloo(algorithm, shard_dim):
+    run_distributed(_muon2_dtensor_worker, world_size=2, args=(algorithm, shard_dim))
