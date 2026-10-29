@@ -69,7 +69,7 @@ class _SignDescent(MuonAlgorithm):
 
 
 def test_builtin_algorithms_are_registered():
-    assert {"muon", "normuon", "muonh", "normuonh", "adamh"}.issubset(set(registered_algorithms()))
+    assert {"muon", "normuon", "muonh", "normuonh", "adamh", "dimuon"}.issubset(set(registered_algorithms()))
 
 
 def test_get_algorithm_unknown_name_raises_with_known_names():
@@ -603,3 +603,144 @@ def test_normuonh_matches_reference_and_keeps_norm(monkeypatch, shape):
     torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(p.detach().norm(dim=(-2, -1)), init_norm)
     torch.testing.assert_close(optimizer.state[p]["variance_neuron"], v, rtol=1e-5, atol=1e-7)
+
+
+# --- Dimuon numerics -----------------------------------------------------------------
+
+
+def _dimuon_reference_step(p, g, buf, *, lr, beta1, damping, wd=0.0):
+    """Transcription of catid/dimuon's ``Dimuon.step`` with identity Polar Express.
+
+    Conditioners come from the momentum before the EMA update; ``p`` is a single
+    matrix or a batch of matrices (the reference's expert axis). ``wd`` is
+    muonium's (non-cautious) addition and is 0 in the reference.
+    """
+
+    def conditioner(energy):
+        peak = energy.amax(dim=-1, keepdim=True)
+        cond = (energy / peak.clamp_min(torch.finfo(energy.dtype).tiny) + damping) ** -0.25
+        return torch.where(peak > 0, cond, torch.ones_like(cond))
+
+    left = conditioner((buf * buf).sum(dim=-1))
+    right = conditioner((buf * buf).sum(dim=-2))
+    buf.mul_(beta1).add_((1 - beta1) * g)
+    inner = left[..., :, None] * buf * right[..., None, :]
+    d = left[..., :, None] * inner * right[..., None, :]
+    rank = min(d.shape[-2], d.shape[-1])
+    target = lr * math.sqrt(rank) * (rank / 32) ** 0.175
+    p.sub_(target * d / d.norm(dim=(-2, -1), keepdim=True) + lr * wd * p)
+
+
+def _stub_zeropower(monkeypatch):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    monkeypatch.setattr(
+        algo_base, "foreach_zeropower", lambda gs, **_: [g.clone() for g in gs]
+    )
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+@pytest.mark.parametrize("shape", [(4, 3), (3, 4), (2, 3, 4)])
+def test_dimuon_matches_reference_transcription(monkeypatch, shape, foreach):
+    _stub_zeropower(monkeypatch)
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(shape))
+    ref_p = p.detach().clone()
+    ref_buf = torch.zeros_like(ref_p)
+    lr, beta1, damping, wd = 0.1, 0.9, 1e-2, 0.05
+    optimizer = Muon(
+        [{"params": [p], "algorithm": "dimuon", "dimuon_damping": damping}],
+        lr=lr, wd=wd, use_cautious_wd=False, momentum=beta1, foreach=foreach,
+    )
+
+    for step in range(4):
+        grad = torch.randn(shape, generator=torch.Generator().manual_seed(100 + step))
+        p.grad = grad.clone()
+        optimizer.step()
+        _dimuon_reference_step(ref_p, grad, ref_buf, lr=lr, beta1=beta1, damping=damping,
+                               wd=wd)
+
+    torch.testing.assert_close(p.detach(), ref_p, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(optimizer.state[p]["momentum_buffer"], ref_buf)
+    assert set(optimizer.state[p]) == {"step", "lr_ratio", "momentum_buffer"}
+
+
+@pytest.mark.parametrize("foreach", [False, True])
+def test_dimuon_step_norm_follows_rank_rule(foreach):
+    # Real orthogonalization: the update norm is lr * sqrt(r) * (r / 32)^0.175 per
+    # matrix regardless of the gradient scale, and zero gradients leave params alone.
+    torch.manual_seed(0)
+    shapes = [(8, 32), (48, 16), (2, 8, 12)]
+    params = [nn.Parameter(torch.randn(s)) for s in shapes]
+    idle = nn.Parameter(torch.randn(8, 32))
+    lr = 0.01
+    optimizer = Muon(
+        [{"params": [*params, idle], "algorithm": "dimuon"}], lr=lr, wd=0.0, foreach=foreach
+    )
+    for step in range(2):
+        before = [p.detach().clone() for p in (*params, idle)]
+        for i, p in enumerate(params):
+            p.grad = 1e3 * torch.randn(p.shape, generator=torch.Generator().manual_seed(step + 10 * i))
+        idle.grad = torch.zeros_like(idle)
+        optimizer.step()
+        for p, old in zip(params, before, strict=True):
+            rank = min(p.shape[-2:])
+            expected = lr * math.sqrt(rank) * (rank / 32) ** 0.175
+            torch.testing.assert_close(
+                (p.detach() - old).norm(dim=(-2, -1)),
+                torch.full(p.shape[:-2], expected),
+                rtol=1e-4, atol=0.0,
+            )
+        torch.testing.assert_close(idle.detach(), before[-1])
+
+
+def test_dimuon_split_sizes_match_separate_params(monkeypatch):
+    _stub_zeropower(monkeypatch)
+    torch.manual_seed(0)
+    fused = nn.Parameter(torch.randn(7, 4))
+    parts = [nn.Parameter(t.clone()) for t in fused.detach().split([4, 3])]
+    kwargs: dict[str, Any] = dict(lr=0.1, wd=0.0, momentum=0.9)
+    fused_opt = Muon(
+        [{"params": [fused], "algorithm": "dimuon", "split_sizes": (4, 3)}], **kwargs
+    )
+    parts_opt = Muon([{"params": parts, "algorithm": "dimuon"}], **kwargs)
+
+    for step in range(3):
+        grad = torch.randn(7, 4, generator=torch.Generator().manual_seed(step))
+        fused.grad = grad.clone()
+        for p, g in zip(parts, grad.split([4, 3]), strict=True):
+            p.grad = g.clone()
+        fused_opt.step()
+        parts_opt.step()
+
+    torch.testing.assert_close(fused.detach(), torch.cat([p.detach() for p in parts]))
+
+
+def _dimuon_dtensor_worker(rank: int, world_size: int) -> None:
+    # Gloo/CPU with identity zeropower: exercises the conditioner reductions and
+    # normalization on sharded DTensors (2D Shard(0)/Shard(1) and the 3D FSDP path).
+    algo_base.zeropower = lambda g, **_: g
+    algo_base.foreach_zeropower = lambda gs, **_: [g.clone() for g in gs]
+    algo_base.foreach_zeropower_3d_fsdp = lambda gs, **_: [g.clone() for g in gs]
+    mesh = init_device_mesh("cpu", (world_size,))
+    torch.manual_seed(0)
+    cases = [((8, 6), Shard(0)), ((8, 6), Shard(1)), ((4, 6, 5), Shard(0))]
+    for foreach in (False, True):
+        for shape, placement in cases:
+            full = torch.randn(shape)
+            dp = nn.Parameter(distribute_tensor(full.clone(), mesh, [placement]))
+            rp = nn.Parameter(full.clone())
+            dopt = Muon([{"params": [dp], "algorithm": "dimuon"}], lr=0.1, foreach=foreach)
+            ropt = Muon([{"params": [rp], "algorithm": "dimuon"}], lr=0.1, foreach=foreach)
+            for step in range(2):
+                grad = torch.randn(shape, generator=torch.Generator().manual_seed(step))
+                dp.grad = distribute_tensor(grad.clone(), mesh, [placement])
+                rp.grad = grad.clone()
+                dopt.step()
+                ropt.step()
+            assert isinstance(dp.data, DTensor)
+            assert dp.data.placements == (placement,)
+            torch.testing.assert_close(dp.data.full_tensor(), rp.detach(), rtol=1e-5, atol=1e-6)
+
+
+def test_dimuon_dtensor_matches_single_process() -> None:
+    run_distributed(_dimuon_dtensor_worker, world_size=2, backend="gloo", device_type="cpu")
