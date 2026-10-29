@@ -129,11 +129,10 @@ class Dimuon(MuonAlgorithm):
         if maximize:
             grad = -grad
 
-        # Out-of-place until state copy-back (see MuonBaseline.update).
+        # Out-of-place until state copy-back (see MuonBaseline.update). ``old`` aliases
+        # an fp32 buffer, so copy back only after the conditioners have read it.
         old = momentum_buffer.to(torch.float32)
         m_new = torch.lerp(old, grad.to(torch.float32), 1 - momentum)
-        momentum_buffer.copy_(m_new)
-
         d = _dimuon_direction(
             old,
             m_new,
@@ -142,6 +141,7 @@ class Dimuon(MuonAlgorithm):
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
         )
+        momentum_buffer.copy_(m_new)
         _apply(param, d, lr, weight_decay, cautious_wd)
 
     def foreach_update(
