@@ -35,10 +35,10 @@ they spawn a small **gloo** world on CPU and run anywhere.
 ### Single optimizer, pluggable algorithms dispatched by param group
 
 `Muon` (`optim/optim.py`) is one `torch.optim.Optimizer` that drives the whole Muon family plus
-Adam. Each param-group dict carries an `"algorithm"` key: `"adam"`/`"adamw"` take the special-cased
+Adam. Each param-group dict carries an `"algorithm"` key: `"adam"`/`"adamw"`/`"adamc"` take the special-cased
 Adam path (`_step_adam_group` → `torch.optim.adam.adam`, the upstream fused kernel); every other
 name is resolved through the **algorithm registry** in `optim/algorithms/` (`"muon"` is the
-default; `"normuon"`, `"muonh"`, `"normuonh"`, `"adamh"` (Hyperball, arXiv 2606.16899), and `"dimuon"` (catid/dimuon) are built in; third parties add variants with `@register_muon_algorithm`).
+default; `"muonc"` and `"adamc"` (corrected weight decay, arXiv 2506.02285), `"normuon"`, `"muonh"`, `"normuonh"`, `"adamh"` (Hyperball, arXiv 2606.16899), and `"dimuon"` (catid/dimuon) are built in; third parties add variants with `@register_muon_algorithm`).
 The constructor normalizes every group through `_build_muon_group` / `_build_adam_group`, which
 stamp a `use_muon` flag and resolve each option (lr, wd, momentum, …) with a per-group override
 falling back to the constructor default; variant-specific options (declared in

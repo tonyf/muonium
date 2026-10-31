@@ -37,7 +37,7 @@ RESERVED_GROUP_KEYS = frozenset(
 )
 
 # Algorithm names routed to the Adam path in Muon.__init__, never to this registry.
-ADAM_ALGORITHMS = ("adam", "adamw")
+ADAM_ALGORITHMS = ("adam", "adamw", "adamc")
 
 
 @dataclass(frozen=True)
@@ -187,6 +187,11 @@ class MuonAlgorithm(ABC):
         "momentum_buffer": BufferSpec(like="grad", signed=True),
     }
 
+    def resolve_options(self, group: dict) -> None:
+        """Fill or check options in a built group dict whose defaults depend on the
+        group (e.g. MuonC's ``max_lr`` defaults to its ``lr``). Called after the
+        generic option resolution at construction and on checkpoint load."""
+
     def validate_param(self, p: Tensor) -> None:
         """Reject parameters this algorithm cannot handle (called at group build)."""
         if p.ndim < 2:
@@ -304,10 +309,10 @@ def get_algorithm(name: str) -> MuonAlgorithm:
     except KeyError:
         raise ValueError(
             f"Unknown algorithm '{name}'. Registered Muon algorithms: "
-            f"{sorted(_REGISTRY)}; 'adam' and 'adamw' select the Adam path."
+            f"{sorted(_REGISTRY)}; 'adam', 'adamw' and 'adamc' select the Adam path."
         ) from None
 
 
 def registered_algorithms() -> tuple[str, ...]:
-    """Names of all registered Muon algorithms (excludes 'adam'/'adamw')."""
+    """Names of all registered Muon algorithms (excludes the Adam-path names)."""
     return tuple(sorted(_REGISTRY))

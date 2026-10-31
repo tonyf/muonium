@@ -13,9 +13,10 @@ Formerly published as `dtensor-muon`.
   sharded along dim 0 (the FSDP layout). For expert-parallel MoEs, orthogonalization runs
   directly on the local sharded parameters with no collectives at all.
 - **A base for Muon variants.** The update rule is pluggable per param group: baseline
-  Muon, [NorMuon](https://arxiv.org/abs/2510.05491), and Hyperball's
-  [MuonH/NorMuonH/AdamH](https://arxiv.org/abs/2606.16899), and
-  [Dimuon](https://github.com/catid/dimuon) are built in, and third parties
+  Muon, [NorMuon](https://arxiv.org/abs/2510.05491), Hyperball's
+  [MuonH/NorMuonH/AdamH](https://arxiv.org/abs/2606.16899),
+  [Dimuon](https://github.com/catid/dimuon), and corrected-weight-decay
+  [MuonC/AdamC](https://arxiv.org/abs/2506.02285) are built in, and third parties
   register their own variants with a few dozen lines — the optimizer supplies state
   allocation, batching, CPU offload, DTensor handling, and `torch.compile` around your
   math. Variant names persist in checkpoints.
@@ -132,11 +133,17 @@ The `"algorithm"` key selects the update rule per param group. `"muon"` (default
 
 | Algorithm | Extra group options | Description |
 | --- | --- | --- |
+| `"muonc"` | `max_lr` (the group's `lr`) | Muon with corrected weight decay, from [Why Gradients Rapidly Increase Near the End of Training](https://arxiv.org/abs/2506.02285) (Defazio et al., 2025): `wd` is scaled by `lr / max_lr`, so each step decays by `lr² / max_lr · wd` instead of `lr · wd`. Under a decaying schedule this keeps the weight norm of normalized layers in equilibrium instead of letting decay die out with the LR. Set `max_lr` to the schedule's peak if the group's initial `lr` isn't it (e.g. with warmup from 0). |
 | `"normuon"` | `muon_beta2` (`0.95`) | [NorMuon](https://arxiv.org/abs/2510.05491): normalizes the orthogonalized update by a per-neuron second-moment EMA, then rescales to preserve its Frobenius norm. Adds a `variance_neuron` state buffer (one value per row). |
 | `"muonh"` | — | MuonH, from [Hyperball Optimization](https://arxiv.org/abs/2606.16899) (Wen et al., 2026): normalizes the orthogonalized update to unit Frobenius norm, steps by `lr * ‖W‖_F`, then projects each matrix back to its initial norm. `lr` is an angular step size; `wd` is ignored (the projection replaces it). Don't use with zero-initialized weights. |
 | `"normuonh"` | `muon_beta2` (`0.95`) | NorMuonH: the [NorMuon](https://arxiv.org/abs/2510.05491) direction (orthogonalize, then per-neuron normalization) followed by the [Hyperball](https://arxiv.org/abs/2606.16899) step. Same caveats as `"muonh"`; adds NorMuon's `variance_neuron` buffer. |
 | `"adamh"` | `beta2` (`0.95`), `eps` (`1e-8`) | AdamH, from the same [paper](https://arxiv.org/abs/2606.16899): the same Hyperball projection around the Adam direction `m / (√v + eps)` instead of the orthogonalized update; `momentum` is beta1. Adds `exp_avg` / `exp_avg_sq` state buffers. Like `"muonh"`, it is for weight matrices; embeddings, norms and scalars stay on `"adam"`/`"adamw"`, as in the paper. |
 | `"dimuon"` | `dimuon_damping` (`1e-4`) | [Dimuon](https://github.com/catid/dimuon): two-sided diagonal preconditioning around the orthogonalization. Row/column conditioners `(energy / max + damping)^-1/4` from the previous momentum wrap the EMA momentum before and after orthogonalizing; the result is normalized and stepped by `lr * √r * (r/32)^0.175` (`r = min(rows, cols)`) in place of `lr_ratio`. `momentum` is the EMA beta1 (the reference uses `0.9`) and `nesterov` is ignored. The reference has no weight decay (set `wd=0` to match) or built-in grad clipping (use `clip_grad_norm_`). |
+
+`"adamc"` is the same correction on the Adam path (AdamC, Algorithm 1 of the same paper):
+AdamW whose decoupled decay is `lr² / max_lr · wd`, with `max_lr` defaulting to the group's
+`lr`. The paper applies the correction only to layers followed by a normalization layer, which
+is the user's choice of group here; keep plain `"adamw"` for the rest.
 
 Variant-specific hyperparameters travel in the group dict, next to the `algorithm` key that
 selects them:
