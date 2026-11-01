@@ -109,6 +109,9 @@ class Muon(torch.optim.Optimizer):
             params: An iterable of parameters or an iterable of param-group dicts.
                 Each param-group dict can have an optional "algorithm" key:
                 - "adamw" or "adam": Use Adam/AdamW for this group
+                - "adamc": AdamW with corrected weight decay
+                  (https://arxiv.org/abs/2506.02285): decay scaled by
+                  ``lr / max_lr``; ``max_lr`` defaults to the group's ``lr``
                 - "muon" or omitted: Use Muon for this group (default)
                 - any registered Muon variant name (e.g. "normuon"); see
                   ``muonium.register_muon_algorithm``. Variant-specific
@@ -292,11 +295,12 @@ class Muon(torch.optim.Optimizer):
         # fall back to the algorithm's declared defaults.
         for key, default in algorithm.options.items():
             built[key] = group.get(key, default)
+        algorithm.resolve_options(built)
         return built
 
     def _build_adam_group(self, group: dict):
         algorithm = cast(str, group.get("algorithm", "adamw")).lower()
-        return {
+        built = {
             "params": group["params"],
             "algorithm": algorithm,
             "use_muon": False,
@@ -313,6 +317,15 @@ class Muon(torch.optim.Optimizer):
             "maximize": group.get("maximize", self.maximize),
             "has_complex": any(torch.is_complex(p) for p in group["params"]),
         }
+        if algorithm == "adamc":
+            # Corrected weight decay is defined on top of decoupled (AdamW) decay.
+            if not group.get("decoupled_weight_decay", True):
+                raise ValueError("adamc requires decoupled_weight_decay=True")
+            built["decoupled_weight_decay"] = True
+            built["max_lr"] = float(group.get("max_lr", built["lr"]))
+            if not built["max_lr"] > 0:
+                raise ValueError(f"adamc requires max_lr > 0, got {built['max_lr']}")
+        return built
 
     def __setstate__(self, state):
         super().__setstate__(state)
@@ -334,6 +347,7 @@ class Muon(torch.optim.Optimizer):
                     group.setdefault(key, default)
                 if not torch.is_tensor(group["lr"]):
                     group["lr"] = torch.tensor(float(group["lr"]))
+                algorithm.resolve_options(group)
 
                 for p in group["params"]:
                     p_state = self.state.get(p, [])
@@ -663,6 +677,13 @@ class Muon(torch.optim.Optimizer):
 
         lr = group["lr"]
         weight_decay = group["wd"]
+        if group.get("algorithm") == "adamc":
+            # Corrected weight decay (https://arxiv.org/abs/2506.02285): the
+            # decoupled decay lr * wd becomes lr^2 / max_lr * wd.
+            weight_decay = weight_decay * lr / group["max_lr"]
+            if torch.is_tensor(weight_decay):
+                # Tensor lr: the Adam kernels take a float weight_decay.
+                weight_decay = weight_decay.item()
         if not group["fused"] and not torch.compiler.is_compiling():
             lr = float(lr) if torch.is_tensor(lr) else lr
             weight_decay = (

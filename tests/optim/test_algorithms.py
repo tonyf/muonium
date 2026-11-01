@@ -69,7 +69,7 @@ class _SignDescent(MuonAlgorithm):
 
 
 def test_builtin_algorithms_are_registered():
-    builtins = {"muon", "normuon", "muonh", "normuonh", "adamh", "dimuon"}
+    builtins = {"muon", "muonc", "normuon", "muonh", "normuonh", "adamh", "dimuon"}
     assert builtins.issubset(set(registered_algorithms()))
 
 
@@ -745,3 +745,87 @@ def _dimuon_dtensor_worker(rank: int, world_size: int) -> None:
 
 def test_dimuon_dtensor_matches_single_process() -> None:
     run_distributed(_dimuon_dtensor_worker, world_size=2, backend="gloo", device_type="cpu")
+
+
+# --- Corrected weight decay (MuonC / AdamC) ------------------------------------------
+
+
+LR_SCHEDULE = [0.1, 0.05, 0.02, 0.01]
+
+
+@pytest.mark.parametrize("foreach", [False, pytest.param(True, marks=requires_cuda)])
+@pytest.mark.parametrize("cautious", [False, True])
+def test_muonc_matches_muon_with_lr_scaled_wd(monkeypatch, foreach, cautious):
+    # MuonC under a decaying schedule == Muon with wd rescaled by lr / max_lr each step.
+    _stub_zeropower(monkeypatch)
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(6, 4))
+    ref = nn.Parameter(p.detach().clone())
+    wd = 0.5
+    kwargs: dict[str, Any] = dict(wd=wd, use_cautious_wd=cautious, foreach=foreach)
+    opt = Muon([{"params": [p], "algorithm": "muonc"}], lr=LR_SCHEDULE[0], **kwargs)
+    ref_opt = Muon([{"params": [ref]}], lr=LR_SCHEDULE[0], **kwargs)
+    assert opt.param_groups[0]["max_lr"] == pytest.approx(LR_SCHEDULE[0])
+
+    for step, lr in enumerate(LR_SCHEDULE):
+        opt.param_groups[0]["lr"].fill_(lr)
+        ref_opt.param_groups[0]["lr"].fill_(lr)
+        ref_opt.param_groups[0]["wd"] = wd * lr / LR_SCHEDULE[0]
+        grad = torch.randn(6, 4, generator=torch.Generator().manual_seed(step))
+        p.grad, ref.grad = grad.clone(), grad.clone()
+        opt.step()
+        ref_opt.step()
+
+    torch.testing.assert_close(p.detach(), ref.detach(), rtol=1e-5, atol=1e-6)
+
+
+def test_muonc_max_lr_option_and_validation(monkeypatch):
+    _stub_zeropower(monkeypatch)
+    p = nn.Parameter(torch.randn(4, 3))
+    opt = Muon([{"params": [p], "algorithm": "muonc", "lr": 0.01, "max_lr": 0.04}], wd=0.1)
+    assert opt.param_groups[0]["max_lr"] == pytest.approx(0.04)
+    with pytest.raises(ValueError, match="max_lr > 0"):
+        Muon([{"params": [p], "algorithm": "muonc", "max_lr": 0.0}])
+
+    # max_lr survives a checkpoint round trip into a fresh optimizer.
+    p.grad = torch.randn_like(p)
+    opt.step()
+    fresh = Muon([{"params": [p], "algorithm": "muonc", "lr": 0.01}], wd=0.1)
+    fresh.load_state_dict(opt.state_dict())
+    assert fresh.param_groups[0]["max_lr"] == pytest.approx(0.04)
+
+
+def test_adamc_matches_adamw_with_lr_scaled_wd():
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(5, 3))
+    ref = nn.Parameter(p.detach().clone())
+    wd, max_lr = 0.5, 0.2
+    opt = Muon(
+        [{"params": [p], "algorithm": "adamc", "max_lr": max_lr, "fused": False}],
+        lr=LR_SCHEDULE[0], wd=wd,
+    )
+    ref_opt = torch.optim.AdamW([ref], lr=LR_SCHEDULE[0], betas=(0.9, 0.95), eps=1e-8)
+    assert opt.param_groups[0]["decoupled_weight_decay"]
+
+    for step, lr in enumerate(LR_SCHEDULE):
+        opt.param_groups[0]["lr"] = lr
+        ref_opt.param_groups[0]["lr"] = lr
+        ref_opt.param_groups[0]["weight_decay"] = wd * lr / max_lr
+        grad = torch.randn(5, 3, generator=torch.Generator().manual_seed(step))
+        p.grad, ref.grad = grad.clone(), grad.clone()
+        opt.step()
+        ref_opt.step()
+
+    torch.testing.assert_close(p.detach(), ref.detach())
+
+
+def test_adamc_defaults_and_validation():
+    p = nn.Parameter(torch.randn(5))
+    opt = Muon([{"params": [p], "algorithm": "adamc"}], lr=0.03, is_adamw=False)
+    group = opt.param_groups[0]
+    assert group["max_lr"] == 0.03
+    assert group["decoupled_weight_decay"]
+    with pytest.raises(ValueError, match="decoupled_weight_decay=True"):
+        Muon([{"params": [p], "algorithm": "adamc", "decoupled_weight_decay": False}])
+    with pytest.raises(ValueError, match="max_lr > 0"):
+        Muon([{"params": [p], "algorithm": "adamc", "max_lr": -1.0}])
