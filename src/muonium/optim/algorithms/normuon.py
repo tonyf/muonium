@@ -18,18 +18,21 @@ def _normuon_normalize(
     v: Tensor,
     muon_beta2: float,
     split_sizes: tuple[int, ...] | None = None,
+    *,
+    preserve_norm: bool = True,
 ) -> tuple[Tensor, Tensor]:
     """Neuron-wise normalization of an orthogonalized update.
 
     Maintains a per-row (neuron) second-moment EMA ``v``, divides the update by
-    its square root, then rescales to preserve the update's Frobenius norm.
-    Returns ``(normalized_u, new_v)`` out-of-place; the caller copies ``new_v``
-    back into optimizer state. With ``split_sizes``, each row block is normalized
-    independently, matching the update separate per-block parameters would get.
+    its square root, and optionally rescales to preserve the update's Frobenius
+    norm. Returns ``(normalized_u, new_v)`` out-of-place; the caller copies
+    ``new_v`` back into optimizer state. With ``split_sizes``, each row block is
+    normalized independently, matching the update separate per-block parameters
+    would get.
     """
     if split_sizes is not None:
         results = [
-            _normuon_normalize(u_block, v_block, muon_beta2)
+            _normuon_normalize(u_block, v_block, muon_beta2, preserve_norm=preserve_norm)
             for u_block, v_block in zip(
                 u.split(list(split_sizes), dim=-2),
                 v.split(list(split_sizes), dim=-2),
@@ -42,17 +45,25 @@ def _normuon_normalize(
         )
 
     u = u.to(v.dtype)
-    norm_u = u.norm(p=2, dim=(-2, -1), keepdim=True)
 
     # Neuron-wise second moment: mean of squares along the input dimension.
     neuron_norms = (u * u).mean(dim=-1, keepdim=True)
     v_new = torch.lerp(v, neuron_norms, 1 - muon_beta2)
+    inv_std = 1.0 / (v_new.sqrt() + 1e-8)
 
-    u = u / (v_new.sqrt() + 1e-8)
+    if not preserve_norm:
+        return u * inv_std, v_new
 
-    # Rescale to preserve the Frobenius norm of the unnormalized update.
-    norm_u_new = u.norm(p=2, dim=(-2, -1), keepdim=True).clamp(min=1e-8)
-    return u * (norm_u / norm_u_new), v_new
+    # Algebraically fuse the Frobenius-norm rescaling over the tiny (..., M, 1)
+    # neuron_norms vector instead of scanning the full matrix twice more.
+    cols = u.size(-1)
+    norm_u = (neuron_norms.sum(dim=-2, keepdim=True) * cols).sqrt()
+    norm_u_new = (
+        ((neuron_norms * inv_std * inv_std).sum(dim=-2, keepdim=True) * cols)
+        .clamp(min=1e-16)
+        .sqrt()
+    )
+    return u * (inv_std * (norm_u / norm_u_new)), v_new
 
 
 @register_muon_algorithm

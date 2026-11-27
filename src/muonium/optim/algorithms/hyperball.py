@@ -200,7 +200,11 @@ class NorMuonHyperball(MuonHyperball):
     ) -> Tensor:
         variance_neuron = state["variance_neuron"]
         u, v_new = _normuon_normalize(
-            u, variance_neuron.to(torch.float32), muon_beta2, split_sizes
+            u,
+            variance_neuron.to(torch.float32),
+            muon_beta2,
+            split_sizes,
+            preserve_norm=False,
         )
         variance_neuron.copy_(v_new)
         return u
