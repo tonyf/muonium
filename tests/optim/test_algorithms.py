@@ -605,6 +605,19 @@ def test_muonh_foreach_bf16_matches_per_param_fp32_step(monkeypatch):
     torch.testing.assert_close(fe_p.detach(), ref_p.detach(), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("algorithm", ["muonh", "normuonh", "adamh"])
+def test_hyperball_zero_grad_preserves_param_and_norm(monkeypatch, algorithm: str):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    torch.manual_seed(0)
+    p = nn.Parameter(torch.randn(4, 3))
+    before = p.detach().clone()
+    p.grad = torch.zeros_like(p)
+
+    Muon([{"params": [p], "algorithm": algorithm}], lr=0.5, foreach=False).step()
+
+    torch.testing.assert_close(p.detach(), before, rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize("shape", [(4, 3), (2, 3, 4)])
 def test_adamh_matches_bias_corrected_reference_and_keeps_norm(shape):
     torch.manual_seed(0)

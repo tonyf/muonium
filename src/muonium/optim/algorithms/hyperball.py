@@ -40,14 +40,23 @@ def _hyperball_step(p: Tensor, u: Tensor, lr: Tensor) -> Tensor:
     """
     # ponytail: R is re-read from the current weights instead of stored at init;
     # the projection keeps ||W|| == R, so this only drifts by rounding (bf16 params).
-    radius = _matrix_sum(p * p).sqrt()
     u = u.to(p.dtype)
-    u = u / _matrix_sum(u * u).sqrt().clamp(min=1e-8)
-    # ||p - lr R u||^2 expanded with ||p|| = R, ||u|| = 1: reduces over the inputs
-    # only, saving a pass over the trial point.
-    dot = _matrix_sum(p * u)
-    w_norm = (radius * radius * (1 + lr * lr) - 2 * lr * radius * dot).clamp(min=1e-16).sqrt()
-    return (p - lr * radius * u) * (radius / w_norm)
+    radius_sq = _matrix_sum(p * p)
+    radius = radius_sq.sqrt()
+    u_norm = _matrix_sum(u * u).sqrt()
+    # Zero updates must leave p untouched rather than shrinking by 1/sqrt(1 + lr^2).
+    inv_u_norm = torch.where(u_norm > 1e-8, 1.0 / u_norm.clamp(min=1e-8), 0.0)
+    u_hat_norm_sq = (u_norm * inv_u_norm).square()
+    # ||p - lr R u_hat||^2 expanded without materializing normalized u_hat.
+    dot = _matrix_sum(p * u) * inv_u_norm
+    w_norm = (
+        (radius_sq * (1.0 + lr * lr * u_hat_norm_sq) - 2.0 * lr * radius * dot)
+        .clamp(min=1e-16)
+        .sqrt()
+    )
+    p_scale = radius / w_norm
+    u_scale = p_scale * lr * radius * inv_u_norm
+    return p * p_scale - u * u_scale
 
 
 @register_muon_algorithm
