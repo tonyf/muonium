@@ -478,6 +478,61 @@ def test_split_sizes_matches_separate_params_across_algorithms(monkeypatch, algo
         )
 
 
+def test_orthogonalize_batch_split_sizes_batches_across_layers(monkeypatch):
+    call_sizes: list[tuple[int, int]] = []
+
+    def recording_foreach_zeropower(gs, **_kwargs):
+        call_sizes.append((len(gs), gs[0].size(-2)))
+        return [g / g.norm() for g in gs]
+
+    monkeypatch.setattr(algo_base, "foreach_zeropower", recording_foreach_zeropower)
+    torch.manual_seed(0)
+    gs = [torch.randn(8, 4) for _ in range(3)]
+
+    outs = algo_base.orthogonalize_batch(
+        gs, ns_steps=5, strategy="newton_schulz", split_sizes=(4, 2, 2)
+    )
+
+    assert sorted(call_sizes) == [(3, 4), (6, 2)]
+    assert len(outs) == 3
+    for g, out in zip(gs, outs, strict=True):
+        expected = algo_base.orthogonalize_single(
+            g, ns_steps=5, strategy="newton_schulz", split_sizes=(4, 2, 2)
+        )
+        torch.testing.assert_close(out, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_adamh_foreach_matches_per_param(monkeypatch, dtype: torch.dtype):
+    import muonium.optim.optim as optim_module
+
+    monkeypatch.setattr(
+        optim_module,
+        "move_tensors_to_device",
+        lambda tensors, _src, _dst: tensors,
+    )
+    torch.manual_seed(0)
+    ref_ps = [nn.Parameter(torch.randn(8, 4, dtype=dtype)) for _ in range(2)]
+    fe_ps = [nn.Parameter(p.detach().clone()) for p in ref_ps]
+    ref_opt = Muon([{"params": ref_ps, "algorithm": "adamh"}], lr=0.1, foreach=False)
+    fe_opt = Muon([{"params": fe_ps, "algorithm": "adamh"}], lr=0.1, foreach=True)
+
+    for step in range(2):
+        grads = [
+            torch.randn(8, 4, dtype=dtype, generator=torch.Generator().manual_seed(10 * step + i))
+            for i in range(2)
+        ]
+        for p, g in zip(ref_ps, grads, strict=True):
+            p.grad = g.clone()
+        for p, g in zip(fe_ps, grads, strict=True):
+            p.grad = g.clone()
+        ref_opt.step()
+        fe_opt.step()
+
+    for r, f in zip(ref_ps, fe_ps, strict=True):
+        torch.testing.assert_close(f.detach(), r.detach(), rtol=1e-5, atol=1e-6)
+
+
 # --- checkpointing -------------------------------------------------------------------
 
 

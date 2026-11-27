@@ -284,3 +284,40 @@ class AdamHyperball(MuonAlgorithm):
         param.copy_(
             _hyperball_step(p, m / (v.sqrt() + eps), lr, split_sizes=split_sizes).view_as(param)
         )
+
+    def foreach_update(
+        self,
+        params: list[Tensor],
+        grads: list[Tensor],
+        state: dict[str, list[Tensor]],
+        lr_ratios: list[Tensor],
+        *,
+        lr: Tensor,
+        momentum: float,
+        maximize: bool,
+        split_sizes: tuple[int, ...] | None = None,
+        beta2: float = 0.95,
+        eps: float = 1e-8,
+        **opts,
+    ) -> None:
+        """Batched AdamH update. Assumes all tensors are same shape and device."""
+        g = [g_.to(torch.float32) for g_ in grads]
+        if maximize:
+            g = list(torch._foreach_neg(g))
+
+        m = state["exp_avg"]
+        v = state["exp_avg_sq"]
+        torch._foreach_lerp_(m, g, 1 - momentum)
+        g_sq = torch._foreach_mul(g, g)
+        torch._foreach_lerp_(v, g_sq, 1 - beta2)
+
+        denom = list(torch._foreach_sqrt(v))
+        torch._foreach_add_(denom, eps)
+        u = torch._foreach_div(m, denom)
+
+        for p, g_, u_ in zip(params, g, u, strict=True):
+            p.copy_(
+                _hyperball_step(
+                    p.to(torch.float32).view_as(g_), u_, lr, split_sizes=split_sizes
+                ).view_as(p)
+            )

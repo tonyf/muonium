@@ -165,11 +165,25 @@ def orthogonalize_batch(
                 for g in gs
             ]
         scales = split_lr_scales(gs[0].shape, split_sizes) if apply_lr_scales else None
-        return [
-            _split_orthogonalize_full(
-                g, split_sizes, scales, ns_steps=ns_steps, strategy=strategy
+        all_blocks = [list(g.split(list(split_sizes), dim=-2)) for g in gs]
+        by_height: dict[int, list[tuple[int, int]]] = {}
+        for layer_idx, blocks in enumerate(all_blocks):
+            for block_idx, block in enumerate(blocks):
+                by_height.setdefault(block.size(-2), []).append((layer_idx, block_idx))
+
+        out: list[list[Tensor | None]] = [[None] * len(split_sizes) for _ in gs]
+        for pairs in by_height.values():
+            ortho = foreach_zeropower(
+                [all_blocks[layer_idx][block_idx] for layer_idx, block_idx in pairs],
+                steps=ns_steps,
+                strategy=strategy,
             )
-            for g in gs
+            for (layer_idx, block_idx), u in zip(pairs, ortho, strict=True):
+                out[layer_idx][block_idx] = (
+                    u * scales[block_idx] if scales is not None else u
+                )
+        return [
+            torch.cat([u for u in layer_out if u is not None], dim=-2) for layer_out in out
         ]
     if is_fsdp_3d_sharded(gs):
         return cast(
