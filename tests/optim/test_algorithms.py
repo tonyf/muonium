@@ -186,10 +186,12 @@ def _normuon_reference_step(p, g, buf, v, *, lr, wd, cautious, momentum, nestero
     u = u / (v.sqrt() + 1e-8)
     u = u * (norm_u / u.norm(p=2, dim=(-2, -1), keepdim=True).clamp(min=1e-8))
 
-    if wd != 0:
-        u = u + wd * p * (u * p > 0) if cautious else u + wd * p
     lr_ratio = math.sqrt(max(1.0, p.shape[-2] / p.shape[-1]))
-    p.sub_(lr_ratio * lr * u)
+    update = lr_ratio * lr * u
+    if wd != 0:
+        decay = wd * p * (u * p > 0) if cautious else wd * p
+        update = update + lr * decay
+    p.sub_(update)
 
 
 @pytest.mark.parametrize("shape", [(4, 3), (3, 4), (2, 3, 4)])
@@ -341,6 +343,42 @@ def test_split_sizes_orthogonalizes_row_blocks_independently(monkeypatch):
     lr_ratio = math.sqrt(6 / 4)
     torch.testing.assert_close(
         p.detach(), torch.ones(6, 4) - lr_ratio * 0.1 * expected_u, rtol=1e-5, atol=1e-6
+    )
+
+
+def test_split_sizes_with_weight_decay_matches_separate_params(monkeypatch):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g / g.norm())
+    monkeypatch.setattr(
+        algo_base, "foreach_zeropower", lambda gs, **_: [g / g.norm() for g in gs]
+    )
+    torch.manual_seed(11)
+    fused_p = nn.Parameter(torch.randn(12, 4))
+    grad = torch.randn(12, 4)
+    fused_p.grad = grad.clone()
+
+    sep_ps = [nn.Parameter(b.detach().clone()) for b in fused_p.split([4, 4, 4], dim=0)]
+    for sp, sg in zip(sep_ps, grad.split([4, 4, 4], dim=0), strict=True):
+        sp.grad = sg.clone()
+
+    Muon(
+        [{"params": [fused_p], "split_sizes": (4, 4, 4)}],
+        lr=0.1,
+        wd=0.2,
+        momentum=0.0,
+        nesterov=False,
+        use_cautious_wd=True,
+    ).step()
+    Muon(
+        sep_ps,
+        lr=0.1,
+        wd=0.2,
+        momentum=0.0,
+        nesterov=False,
+        use_cautious_wd=True,
+    ).step()
+
+    torch.testing.assert_close(
+        fused_p.detach(), torch.cat([sp.detach() for sp in sep_ps], dim=0), rtol=1e-5, atol=1e-6
     )
 
 

@@ -453,6 +453,28 @@ def test_muon_non_cautious_weight_decay_adds_param_everywhere(monkeypatch):
     torch.testing.assert_close(p, torch.tensor([[-1.0, -1.0], [1.0, 1.0]]))
 
 
+@pytest.mark.parametrize("cautious", [True, False])
+def test_muon_weight_decay_is_not_scaled_by_lr_ratio(monkeypatch, cautious: bool):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    # Tall 8x2 matrix has lr_ratio = sqrt(4) = 2.0, while WD must use raw lr.
+    p = torch.nn.Parameter(torch.full((8, 2), 2.0))
+    p.grad = torch.full((8, 2), 1.0)
+    optimizer = Muon(
+        [p],
+        lr=0.1,
+        wd=0.5,
+        momentum=0.0,
+        nesterov=False,
+        use_cautious_wd=cautious,
+    )
+
+    optimizer.step()
+
+    # p_new = p - (lr_ratio * lr * u + lr * wd * p) = 2.0 - (2.0 * 0.1 * 1.0 + 0.1 * 0.5 * 2.0)
+    expected = torch.full((8, 2), 2.0 - (2.0 * 0.1 * 1.0 + 0.1 * 0.5 * 2.0))
+    torch.testing.assert_close(p.detach(), expected)
+
+
 def test_muon_maximize_negates_grad_in_place(monkeypatch):
     monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
     p = torch.nn.Parameter(torch.ones(2, 2))

@@ -64,17 +64,17 @@ class MuonBaseline(MuonAlgorithm):
         )
         u = u.view_as(param_fp32)
 
-        # Apply weight decay. Cautious WD (only where u * p > 0) is an addition
-        # to the original Muon; cautious_wd=False gives plain decoupled WD.
+        # Scale update by shape-adjusted LR; decoupled weight decay uses raw lr
+        # so tall matrices and split_sizes blocks are not over-decayed.
+        adjusted_lr = lr_ratio * lr
+        update = adjusted_lr * u
         if weight_decay != 0:
             if cautious_wd:
-                u = u + weight_decay * param_fp32 * (u * param_fp32 > 0)
+                update = update + (lr * weight_decay) * param_fp32 * (u * param_fp32 > 0)
             else:
-                u = u + weight_decay * param_fp32
+                update = update + (lr * weight_decay) * param_fp32
 
-        # Scale update
-        adjusted_lr = lr_ratio * lr
-        param.copy_(param_fp32 - adjusted_lr * u)
+        param.copy_(param_fp32 - update)
 
     def foreach_update(
         self,
@@ -124,18 +124,21 @@ class MuonBaseline(MuonAlgorithm):
         )
         u = [u_.to(torch.float32).view_as(p_) for u_, p_ in zip(u, p, strict=True)]
 
-        # Apply weight decay into the update direction (mirrors the per-tensor
-        # reference).
+        # Scale update direction by adjusted_lr; decoupled weight decay uses raw lr.
         if weight_decay != 0:
+            wd_scale = lr * weight_decay
             if cautious_wd:
-                # u += weight_decay * p, only where u * p > 0
+                # decay += lr * weight_decay * p, only where u * p > 0
                 mask = [(u_ * p_ > 0).to(torch.float32) for u_, p_ in zip(u, p, strict=True)]
-                masked_p = torch._foreach_mul(p, mask)
-                torch._foreach_add_(u, masked_p, alpha=weight_decay)
+                torch._foreach_mul_(u, adjusted_lr)
+                wd_term = torch._foreach_mul(p, mask)
+                torch._foreach_mul_(wd_term, wd_scale)
+                torch._foreach_add_(u, wd_term)
             else:
-                torch._foreach_add_(u, p, alpha=weight_decay)
-
-        # scale update
-        torch._foreach_mul_(u, adjusted_lr)
+                torch._foreach_mul_(u, adjusted_lr)
+                wd_term = torch._foreach_mul(p, wd_scale)
+                torch._foreach_add_(u, wd_term)
+        else:
+            torch._foreach_mul_(u, adjusted_lr)
 
         torch._foreach_add_(p, u, alpha=-1)
