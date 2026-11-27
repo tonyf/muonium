@@ -100,8 +100,8 @@ def zeropower(
     orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton and G.is_cuda)
 
     if isinstance(G, DTensor):
-        X = G.full_tensor()
-        U = orthogonalize_fn(X.bfloat16(), steps=steps, eps=eps)
+        X = cast(DTensor, G.bfloat16()).full_tensor()
+        U = orthogonalize_fn(X, steps=steps, eps=eps)
         U = DTensor.from_local(
             U, device_mesh=G.device_mesh, placements=(Replicate(),) * G.device_mesh.ndim
         )

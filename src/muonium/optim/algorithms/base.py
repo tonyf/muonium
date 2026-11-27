@@ -120,7 +120,11 @@ def orthogonalize_single(
     scales = split_lr_scales(g.shape, split_sizes)
     if isinstance(g, DTensor):
         u = _split_orthogonalize_full(
-            g.full_tensor(), split_sizes, scales, ns_steps=ns_steps, strategy=strategy
+            cast(DTensor, g.bfloat16()).full_tensor(),
+            split_sizes,
+            scales,
+            ns_steps=ns_steps,
+            strategy=strategy,
         )
         u_replicated = DTensor.from_local(
             u,

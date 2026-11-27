@@ -11,7 +11,9 @@ from typing import Any, Callable, cast
 
 import pytest
 import torch
-from testkit import assert_close, run_example
+from testkit import assert_close, run_distributed, run_example
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
 from muonium.orthogonalize import OrthogonalizationStrategy
 from muonium.orthogonalize.newton_schulz import ns_loop, ns_loop_triton
@@ -87,6 +89,25 @@ def test_resolve_eps_respects_strategy_defaults() -> None:
     assert _resolve_eps("newton_schulz", None) == 1e-7
     assert _resolve_eps("polar_express", None) == 1e-6
     assert _resolve_eps("polar_express", 1e-5) == 1e-5
+
+
+def _zeropower_dtensor_bf16_worker(rank: int, world_size: int) -> None:
+    mesh = init_device_mesh("cpu", (world_size,))
+    torch.manual_seed(0)
+    full = torch.randn(16 * world_size, 8, dtype=torch.float32)
+    d = distribute_tensor(full.clone(), mesh, [Shard(0)])
+
+    out = zeropower(d, steps=5, use_triton=False, strategy="newton_schulz")
+    ref = zeropower(full, steps=5, use_triton=False, strategy="newton_schulz")
+
+    assert isinstance(out, DTensor)
+    assert out.dtype is torch.bfloat16
+    assert out.placements == d.placements
+    torch.testing.assert_close(out.full_tensor(), ref)
+
+
+def test_zeropower_dtensor_fp32_casts_before_gather() -> None:
+    run_distributed(_zeropower_dtensor_bf16_worker, world_size=2)
 
 
 @requires_cuda
