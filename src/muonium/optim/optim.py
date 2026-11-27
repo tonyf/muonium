@@ -327,6 +327,7 @@ class Muon(torch.optim.Optimizer):
                 group.setdefault("flatten", False)
                 group.setdefault("use_cautious_wd", True)
                 group.setdefault("orthogonalization_strategy", "polar_express")
+                group.setdefault("maximize", False)
                 group.setdefault("split_sizes", None)
                 if "foreach" not in group:
                     group["foreach"] = all(p.is_cuda for p in group["params"])

@@ -17,7 +17,9 @@ from muonium.orthogonalize import OrthogonalizationStrategy
 from muonium.orthogonalize.newton_schulz import ns_loop, ns_loop_triton
 from muonium.orthogonalize.orthogonalize import (
     _get_orthogonalization_fn,
+    _resolve_eps,
     foreach_zeropower,
+    foreach_zeropower_3d_fsdp,
     is_fsdp_3d_sharded,
     zeropower,
 )
@@ -74,6 +76,17 @@ def test_zeropower_polar_express_rejects_more_than_five_steps() -> None:
         match="only supports up to 5 optimization steps",
     ):
         zeropower(G, steps=6, use_triton=False, strategy="polar_express")
+    with pytest.raises(
+        AssertionError,
+        match="only supports up to 5 optimization steps",
+    ):
+        foreach_zeropower_3d_fsdp(cast(Any, [G]), steps=6, use_triton=False, strategy="polar_express")
+
+
+def test_resolve_eps_respects_strategy_defaults() -> None:
+    assert _resolve_eps("newton_schulz", None) == 1e-7
+    assert _resolve_eps("polar_express", None) == 1e-6
+    assert _resolve_eps("polar_express", 1e-5) == 1e-5
 
 
 @requires_cuda

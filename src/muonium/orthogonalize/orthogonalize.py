@@ -65,10 +65,16 @@ def _validate_orthogonalization_args(
         )
 
 
+def _resolve_eps(strategy: OrthogonalizationStrategy, eps: float | None) -> float:
+    if eps is not None:
+        return eps
+    return 1e-6 if strategy == "polar_express" else 1e-7
+
+
 def zeropower(
     G: Annotated[Tensor, "N M"] | Annotated[DTensor, "N M"],
     steps: int = 5,
-    eps: float = 1e-7,
+    eps: float | None = None,
     use_triton: bool = True,
     strategy: OrthogonalizationStrategy = "newton_schulz",
 ) -> Annotated[Tensor, "N M"] | Annotated[DTensor, "N M"]:
@@ -78,7 +84,8 @@ def zeropower(
     Args:
         G: Gradient tensor (2D, regular or DTensor)
         steps: Number of iteration steps for the algorithm
-        eps: Small constant for numerical stability
+        eps: Small constant for numerical stability (defaults to 1e-7 for
+            newton_schulz and 1e-6 for polar_express)
         strategy: Orthogonalization algorithm to use:
             - "newton_schulz": Classic Newton-Schulz iteration (default)
             - "polar_express": Polar Express algorithm (arxiv.org/pdf/2505.16932)
@@ -87,6 +94,7 @@ def zeropower(
         Orthogonalized tensor with same structure as input
     """
     _validate_orthogonalization_args(strategy, steps)
+    eps = _resolve_eps(strategy, eps)
 
     # Select the orthogonalization function (Triton Gram kernel is CUDA-only)
     orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton and G.is_cuda)
@@ -108,7 +116,7 @@ def foreach_zeropower(
     | list[Annotated[Tensor, "G N M"]]
     | list[Annotated[DTensor, "G N M"]],
     steps: int = 5,
-    eps: float = 1e-7,
+    eps: float | None = None,
     use_triton: bool = True,
     strategy: OrthogonalizationStrategy = "newton_schulz",
 ) -> (
@@ -123,7 +131,8 @@ def foreach_zeropower(
     Args:
         Gs: List of gradient tensors (2D or 3D, regular or DTensor)
         steps: Number of iteration steps for the algorithm
-        eps: Small constant for numerical stability
+        eps: Small constant for numerical stability (defaults to 1e-7 for
+            newton_schulz and 1e-6 for polar_express)
         use_triton: Whether to use triton kernel (only for newton_schulz)
         strategy: Orthogonalization algorithm to use:
             - "newton_schulz": Classic Newton-Schulz iteration (default)
@@ -133,6 +142,7 @@ def foreach_zeropower(
         List of orthogonalized tensors with same structure as input
     """
     _validate_orthogonalization_args(strategy, steps)
+    eps = _resolve_eps(strategy, eps)
 
     # Validate strategy before indexing Gs so bogus strategies always raise ValueError
     _get_orthogonalization_fn(strategy, False)
@@ -179,7 +189,7 @@ def is_fsdp_3d_sharded(xs: list[DTensor] | list[Tensor]) -> bool:
 def foreach_zeropower_3d_fsdp(
     Gs: list[Annotated[DTensor, "G N M"]],
     steps: int = 5,
-    eps: float = 1e-7,
+    eps: float | None = None,
     use_triton: bool = True,
     strategy: OrthogonalizationStrategy = "newton_schulz",
 ) -> (
@@ -188,6 +198,8 @@ def foreach_zeropower_3d_fsdp(
     | list[Annotated[Tensor, "G N M"]]
     | list[Annotated[DTensor, "G N M"]]
 ):
+    _validate_orthogonalization_args(strategy, steps)
+    eps = _resolve_eps(strategy, eps)
     assert is_fsdp_3d_sharded(Gs), (
         "foreach_zeropower_3d_fsdp only works for DTensors that are *only* sharded along the first dimension"
     )

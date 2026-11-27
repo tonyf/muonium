@@ -594,6 +594,7 @@ def test_load_state_dict_applies_legacy_defaults_and_tensor_steps():
         "flatten",
         "use_cautious_wd",
         "orthogonalization_strategy",
+        "maximize",
     ]:
         del group[key]
     group["lr"] = 0.1
@@ -605,6 +606,7 @@ def test_load_state_dict_applies_legacy_defaults_and_tensor_steps():
     assert group["nesterov"] is True
     assert group["flatten"] is False
     assert group["use_cautious_wd"] is True
+    assert group["maximize"] is False
     # Legacy default matches the constructor default ("polar_express"), so a
     # checkpoint missing the key doesn't silently switch the orthogonalization scheme.
     assert group["orthogonalization_strategy"] == "polar_express"
