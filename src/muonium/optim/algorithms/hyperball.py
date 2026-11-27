@@ -163,7 +163,7 @@ class MuonHyperball(MuonAlgorithm):
             u_ = self.direction(
                 u_, {key: buffers[i] for key, buffers in state.items()}, split_sizes, **opts
             )
-            p.copy_(_hyperball_step(p.view_as(g_), u_, lr).view_as(p))
+            p.copy_(_hyperball_step(p.to(torch.float32).view_as(g_), u_, lr).view_as(p))
 
 
 @register_muon_algorithm

@@ -582,6 +582,29 @@ def test_muonh_matches_reference_and_keeps_norm(monkeypatch, shape, foreach):
     torch.testing.assert_close(p.detach().norm(dim=(-2, -1)), init_norm)
 
 
+def test_muonh_foreach_bf16_matches_per_param_fp32_step(monkeypatch):
+    import muonium.optim.optim as optim_module
+
+    monkeypatch.setattr(
+        optim_module,
+        "move_tensors_to_device",
+        lambda tensors, _src, _dst: tensors,
+    )
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g.bfloat16())
+    monkeypatch.setattr(algo_base, "foreach_zeropower", lambda gs, **_: [g.bfloat16() for g in gs])
+    torch.manual_seed(0)
+    ref_p = nn.Parameter(torch.randn(16, 8, dtype=torch.bfloat16))
+    fe_p = nn.Parameter(ref_p.detach().clone())
+    grad = torch.randn(16, 8, dtype=torch.bfloat16)
+    ref_p.grad = grad.clone()
+    fe_p.grad = grad.clone()
+
+    Muon([{"params": [ref_p], "algorithm": "muonh"}], lr=1e-2, foreach=False).step()
+    Muon([{"params": [fe_p], "algorithm": "muonh"}], lr=1e-2, foreach=True).step()
+
+    torch.testing.assert_close(fe_p.detach(), ref_p.detach(), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("shape", [(4, 3), (2, 3, 4)])
 def test_adamh_matches_bias_corrected_reference_and_keeps_norm(shape):
     torch.manual_seed(0)
