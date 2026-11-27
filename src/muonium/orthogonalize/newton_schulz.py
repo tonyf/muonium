@@ -76,7 +76,9 @@ def ns_loop_triton(
 
     transpose = X.size(-2) > X.size(-1)
     if transpose:
-        X = X.mT  # transpose last two dims
+        # Materialize the transposed layout once before the loop so gram_() does
+        # not copy X on every iteration and B @ X sees contiguous operands.
+        X = X.mT.contiguous()
 
     # Ensure spectral norm <= 1
     X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
@@ -96,11 +98,7 @@ def ns_loop_triton(
         # B := B = b*A + c*A^2   (reuse B storage)
         B.mul_(c).add_(A, alpha=b)
 
-        # B is exactly symmetric because gram_ mirrors its output. In the
-        # transpose path, write B @ X as (X.mT @ B).mT so the matmul sees
-        # contiguous operands while X retains its transpose-friendly layout.
-        BX = (X.mT @ B).mT if transpose else B @ X
-        X = a * X + BX
+        X = a * X + B @ X
 
     if transpose:
         X = X.mT
