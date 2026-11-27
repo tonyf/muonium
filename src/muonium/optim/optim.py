@@ -4,6 +4,7 @@ from typing import cast
 
 import torch
 from torch import Tensor
+from torch.distributed.tensor import DTensor
 from torch.optim.adam import adam
 from torch.optim.optimizer import (
     _device_dtype_check_for_fused,
@@ -57,12 +58,13 @@ def _group_muon_tensors(
     tuple[torch.device, list[Tensor], list[Tensor], dict[str, list[Tensor]], list[Tensor]]
 ]:
     """Build static homogeneous batches that are safe to stack during compilation."""
-    groups: dict[tuple[torch.device, torch.dtype], list[int]] = {}
-    for idx, param in enumerate(params):
-        groups.setdefault((param.device, param.dtype), []).append(idx)
+    groups: dict[tuple, list[int]] = {}
+    for idx, (param, grad) in enumerate(zip(params, grads, strict=True)):
+        dt_key = (True, param.device_mesh, param.placements) if isinstance(param, DTensor) else (False, None, None)
+        groups.setdefault((param.device, param.dtype, grad.dtype, dt_key), []).append(idx)
 
     homogeneous_groups = []
-    for (device, _), group_indices in groups.items():
+    for (device, *_), group_indices in groups.items():
         group_grads = [grads[i] for i in group_indices]
         for _, (_, shape_indices) in group_tensors_by_shape(group_grads).items():
             indices = [group_indices[i] for i in shape_indices]

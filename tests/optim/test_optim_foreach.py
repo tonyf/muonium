@@ -482,3 +482,28 @@ def test_foreach_muon_runs_wd_and_lr_scaling_in_fp32(monkeypatch) -> None:
     Muon([fe_p], foreach=True, lr=1e-4, wd=0.1, momentum=0.0, nesterov=False).step()
 
     torch.testing.assert_close(fe_p.detach(), ref_p.detach(), rtol=1e-6, atol=1e-7)
+
+
+def _group_muon_tensors_dtensor_placements_worker(rank: int, world_size: int) -> None:
+    mesh = init_device_mesh("cpu", (world_size,))
+    p0 = nn.Parameter(distribute_tensor(torch.ones(8, 8), mesh, [Shard(0)]))
+    p1 = nn.Parameter(distribute_tensor(torch.ones(8, 8), mesh, [Shard(1)]))
+    g0 = distribute_tensor(torch.ones(8, 8), mesh, [Shard(0)])
+    g1 = distribute_tensor(torch.ones(8, 8), mesh, [Shard(1)])
+    plain_p = nn.Parameter(torch.ones(8, 8))
+    plain_g = torch.ones(8, 8)
+
+    groups = optim_module._group_muon_tensors(
+        [p0, p1, plain_p],
+        [g0, g1, plain_g],
+        {"momentum_buffer": [g0.clone(), g1.clone(), plain_g.clone()]},
+        [torch.tensor(1.0), torch.tensor(1.0), torch.tensor(1.0)],
+    )
+
+    assert len(groups) == 3
+    for _, gp, _, _, _ in groups:
+        assert len(gp) == 1
+
+
+def test_group_muon_tensors_partitions_dtensor_placements() -> None:
+    run_distributed(_group_muon_tensors_dtensor_placements_worker, world_size=2)
