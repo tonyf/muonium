@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "dtensor_muon",
+  "project_id": "e6878084-7fb0-42d4-b0da-944d03b38a60"
+}
