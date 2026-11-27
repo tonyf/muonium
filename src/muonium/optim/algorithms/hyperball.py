@@ -30,14 +30,33 @@ def _matrix_sum(x: Tensor) -> Tensor:
     return x.sum(dim=-1, keepdim=True).sum(dim=-2, keepdim=True)
 
 
-def _hyperball_step(p: Tensor, u: Tensor, lr: Tensor) -> Tensor:
+def _hyperball_step(
+    p: Tensor,
+    u: Tensor,
+    lr: Tensor,
+    split_sizes: tuple[int, ...] | None = None,
+) -> Tensor:
     """Step ``p`` by ``lr * R`` along unit-Frobenius ``u``, then project back to radius R.
 
     The Hyperball step from Algorithm 1 of https://arxiv.org/abs/2606.16899.
 
     Both inputs are shaped like the (possibly flattened) grad, so norms are per
-    trailing matrix. Returns the new parameter out-of-place.
+    trailing matrix. With ``split_sizes``, each row block is projected onto its
+    own Frobenius sphere, matching separate per-block parameters. Returns the
+    new parameter out-of-place.
     """
+    if split_sizes is not None:
+        return torch.cat(
+            [
+                _hyperball_step(p_block, u_block, lr)
+                for p_block, u_block in zip(
+                    p.split(list(split_sizes), dim=-2),
+                    u.split(list(split_sizes), dim=-2),
+                    strict=True,
+                )
+            ],
+            dim=-2,
+        )
     # ponytail: R is re-read from the current weights instead of stored at init;
     # the projection keeps ||W|| == R, so this only drifts by rounding (bf16 params).
     u = u.to(p.dtype)
@@ -121,10 +140,11 @@ class MuonHyperball(MuonAlgorithm):
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
+            apply_lr_scales=False,
         )
         u = self.direction(u, state, split_sizes, **opts)
         p = param.to(torch.float32).view_as(grad)
-        param.copy_(_hyperball_step(p, u, lr).view_as(param))
+        param.copy_(_hyperball_step(p, u, lr, split_sizes=split_sizes).view_as(param))
 
     def foreach_update(
         self,
@@ -164,6 +184,7 @@ class MuonHyperball(MuonAlgorithm):
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
+            apply_lr_scales=False,
         )
 
         # Per tensor, like NorMuon's normalization: a few reductions that compile
@@ -172,7 +193,10 @@ class MuonHyperball(MuonAlgorithm):
             u_ = self.direction(
                 u_, {key: buffers[i] for key, buffers in state.items()}, split_sizes, **opts
             )
-            p.copy_(_hyperball_step(p.to(torch.float32).view_as(g_), u_, lr).view_as(p))
+            p.copy_(
+                _hyperball_step(p.to(torch.float32).view_as(g_), u_, lr, split_sizes=split_sizes)
+                .view_as(p)
+            )
 
 
 @register_muon_algorithm
@@ -239,6 +263,7 @@ class AdamHyperball(MuonAlgorithm):
         lr: Tensor,
         momentum: float,
         maximize: bool,
+        split_sizes: tuple[int, ...] | None = None,
         beta2: float = 0.95,
         eps: float = 1e-8,
         **opts,
@@ -256,4 +281,6 @@ class AdamHyperball(MuonAlgorithm):
         exp_avg_sq.copy_(v)
 
         p = param.to(torch.float32).view_as(grad)
-        param.copy_(_hyperball_step(p, m / (v.sqrt() + eps), lr).view_as(param))
+        param.copy_(
+            _hyperball_step(p, m / (v.sqrt() + eps), lr, split_sizes=split_sizes).view_as(param)
+        )

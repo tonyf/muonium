@@ -73,7 +73,7 @@ def split_lr_scales(
 def _split_orthogonalize_full(
     g: Tensor,
     split_sizes: tuple[int, ...],
-    scales: tuple[float, ...],
+    scales: tuple[float, ...] | None,
     *,
     ns_steps: int,
     strategy: OrthogonalizationStrategy,
@@ -95,7 +95,7 @@ def _split_orthogonalize_full(
             [blocks[i] for i in indices], steps=ns_steps, strategy=strategy
         )
         for i, u in zip(indices, ortho, strict=True):
-            out[i] = u * scales[i]
+            out[i] = u * scales[i] if scales is not None else u
     return torch.cat([u for u in out if u is not None], dim=-2)
 
 
@@ -105,19 +105,21 @@ def orthogonalize_single(
     ns_steps: int,
     strategy: OrthogonalizationStrategy,
     split_sizes: tuple[int, ...] | None = None,
+    apply_lr_scales: bool = True,
 ):
     """Orthogonalize one tensor. DTensor handling lives inside ``zeropower``.
 
     With ``split_sizes``, row blocks of a fused 2D weight are orthogonalized
-    independently and rescaled so the whole-matrix ``lr_ratio`` applied later
-    matches the per-block adjustment separate parameters would receive. DTensor
-    inputs take a full-tensor round trip (gather, per-block orthogonalize,
-    redistribute back to the original placements) so any sharding is supported.
+    independently and (when ``apply_lr_scales=True``) rescaled so the whole-matrix
+    ``lr_ratio`` applied later matches the per-block adjustment separate
+    parameters would receive. DTensor inputs take a full-tensor round trip
+    (gather, per-block orthogonalize, redistribute back to the original
+    placements) so any sharding is supported.
     """
     if split_sizes is None:
         return zeropower(g, steps=ns_steps, strategy=strategy)
 
-    scales = split_lr_scales(g.shape, split_sizes)
+    scales = split_lr_scales(g.shape, split_sizes) if apply_lr_scales else None
     if isinstance(g, DTensor):
         u = _split_orthogonalize_full(
             cast(DTensor, g.bfloat16()).full_tensor(),
@@ -141,6 +143,7 @@ def orthogonalize_batch(
     ns_steps: int,
     strategy: OrthogonalizationStrategy,
     split_sizes: tuple[int, ...] | None = None,
+    apply_lr_scales: bool = True,
 ) -> list[Tensor]:
     """Orthogonalize a same-shape batch, preferring the FSDP local-shard fast path.
 
@@ -153,11 +156,15 @@ def orthogonalize_batch(
             # Correctness path: per-tensor full-tensor round trips.
             return [
                 orthogonalize_single(
-                    g, ns_steps=ns_steps, strategy=strategy, split_sizes=split_sizes
+                    g,
+                    ns_steps=ns_steps,
+                    strategy=strategy,
+                    split_sizes=split_sizes,
+                    apply_lr_scales=apply_lr_scales,
                 )
                 for g in gs
             ]
-        scales = split_lr_scales(gs[0].shape, split_sizes)
+        scales = split_lr_scales(gs[0].shape, split_sizes) if apply_lr_scales else None
         return [
             _split_orthogonalize_full(
                 g, split_sizes, scales, ns_steps=ns_steps, strategy=strategy

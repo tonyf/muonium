@@ -412,12 +412,12 @@ def test_normuon_split_sizes_normalizes_per_block(monkeypatch):
     scales = split_lr_scales((6, 4), (2, 4))
     v_blocks, u_blocks = [], []
     for block, scale in zip(grad.split([2, 4], dim=0), scales, strict=True):
-        u = scale * block
+        u = block
         norm_u = u.norm()
         v = (1 - 0.9) * (u * u).mean(dim=-1, keepdim=True)
         u = u / (v.sqrt() + 1e-8)
         u = u * (norm_u / u.norm().clamp(min=1e-8))
-        u_blocks.append(u)
+        u_blocks.append(scale * u)
         v_blocks.append(v)
     expected_u = torch.cat(u_blocks, dim=0)
     lr_ratio = math.sqrt(6 / 4)
@@ -429,6 +429,53 @@ def test_normuon_split_sizes_normalizes_per_block(monkeypatch):
         optimizer.state[p]["variance_neuron"], torch.cat(v_blocks, dim=0),
         rtol=1e-5, atol=1e-7,
     )
+
+
+@pytest.mark.parametrize("algorithm", ["normuon", "muonh", "normuonh", "adamh"])
+def test_split_sizes_matches_separate_params_across_algorithms(monkeypatch, algorithm: str):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g / g.norm())
+    monkeypatch.setattr(
+        algo_base, "foreach_zeropower", lambda gs, **_: [g / g.norm() for g in gs]
+    )
+    torch.manual_seed(17)
+    fused_p = nn.Parameter(torch.randn(10, 4))
+    grad = torch.randn(10, 4)
+    fused_p.grad = grad.clone()
+
+    sep_ps = [nn.Parameter(b.detach().clone()) for b in fused_p.split([6, 2, 2], dim=0)]
+    for sp, sg in zip(sep_ps, grad.split([6, 2, 2], dim=0), strict=True):
+        sp.grad = sg.clone()
+
+    fused_opt = Muon(
+        [{"params": [fused_p], "algorithm": algorithm, "split_sizes": (6, 2, 2)}],
+        lr=0.1,
+        wd=0.1,
+        momentum=0.5,
+        nesterov=True,
+        foreach=False,
+    )
+    sep_opt = Muon(
+        [{"params": sep_ps, "algorithm": algorithm}],
+        lr=0.1,
+        wd=0.1,
+        momentum=0.5,
+        nesterov=True,
+        foreach=False,
+    )
+
+    fused_opt.step()
+    sep_opt.step()
+
+    torch.testing.assert_close(
+        fused_p.detach(), torch.cat([sp.detach() for sp in sep_ps], dim=0), rtol=1e-5, atol=1e-6
+    )
+    if "variance_neuron" in fused_opt.state[fused_p]:
+        torch.testing.assert_close(
+            fused_opt.state[fused_p]["variance_neuron"],
+            torch.cat([sep_opt.state[sp]["variance_neuron"] for sp in sep_ps], dim=0),
+            rtol=1e-5,
+            atol=1e-7,
+        )
 
 
 # --- checkpointing -------------------------------------------------------------------

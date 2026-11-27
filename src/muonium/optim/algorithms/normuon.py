@@ -10,7 +10,19 @@ from .base import (
     orthogonalize_batch,
     orthogonalize_single,
     register_muon_algorithm,
+    split_lr_scales,
 )
+
+
+def _apply_split_scales(u: Tensor, split_sizes: tuple[int, ...]) -> Tensor:
+    scales = split_lr_scales(u.shape, split_sizes)
+    return torch.cat(
+        [
+            block * scale
+            for block, scale in zip(u.split(list(split_sizes), dim=-2), scales, strict=True)
+        ],
+        dim=-2,
+    )
 
 
 def _normuon_normalize(
@@ -124,14 +136,17 @@ class NorMuon(MuonAlgorithm):
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
+            apply_lr_scales=False,
         )
 
-        # Neuron-wise normalization on the grad-shaped update, so rows align with
-        # the variance buffer under flatten.
+        # Neuron-wise normalization on the unscaled grad-shaped update, so rows
+        # align with the variance buffer under flatten and split_sizes.
         u, v_new = _normuon_normalize(
             u, variance_neuron.to(torch.float32), muon_beta2, split_sizes
         )
         variance_neuron.copy_(v_new)
+        if split_sizes is not None:
+            u = _apply_split_scales(u, split_sizes)
 
         u = u.view_as(param_fp32)
 
@@ -190,6 +205,7 @@ class NorMuon(MuonAlgorithm):
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
+            apply_lr_scales=False,
         )
 
         # Normalization runs per tensor: it is a handful of reductions that
@@ -200,6 +216,8 @@ class NorMuon(MuonAlgorithm):
         for u_, v in zip(u, state["variance_neuron"], strict=True):
             u_, v_new = _normuon_normalize(u_, v.to(torch.float32), muon_beta2, split_sizes)
             v.copy_(v_new)
+            if split_sizes is not None:
+                u_ = _apply_split_scales(u_, split_sizes)
             normalized.append(u_)
         u = [u_.view_as(p_) for u_, p_ in zip(normalized, p, strict=True)]
 
