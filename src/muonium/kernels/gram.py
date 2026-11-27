@@ -6,13 +6,12 @@ import triton.language as tl
 def get_autotune_config():
     return [
         triton.Config(
-            {"BLOCK_SIZE_M": blk_m, "BLOCK_SIZE_K": blk_k, "GROUP_SIZE_M": grp_sz},
+            {"BLOCK_SIZE_M": blk_m, "BLOCK_SIZE_K": blk_k},
             num_stages=n_stages,
             num_warps=n_warps,
         )
         for blk_m in [32, 64, 128]
         for blk_k in [32, 64]
-        for grp_sz in [8]
         for n_stages in [3, 4, 5]
         for n_warps in [4, 8]
     ]
@@ -36,37 +35,35 @@ def gram_nd(
     stride_yn,
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
 ):
     """
     Computes (per batch): y[b] = x[b] @ x[b].T
     where x has shape (B, M, K) and y has shape (B, M, M).
 
-    We only compute the upper triangle blocks and mirror them into the lower triangle.
+    Launches only upper-triangular blocks (including diagonal) and mirrors them
+    into the lower triangle.
     """
     # 2D launch grid:
-    pid = tl.program_id(axis=0)  # tiles over (M, M)
+    pid = tl.program_id(axis=0)  # upper-triangular tile index over (M, M)
     pid_b = tl.program_id(axis=1)  # batch index (flattened leading dims)
 
     # Move base pointers to this batch
     x = x + pid_b * stride_xb
     y = y + pid_b * stride_yb
 
-    # --- same block mapping logic as your original kernel ---
+    # Map linear pid in [0, T*(T+1)//2) directly to upper-triangular (pid_m, pid_n).
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(M, BLOCK_SIZE_M)
+    total_blocks = num_pid_m * (num_pid_m + 1) // 2
+    inv_pid = total_blocks - 1 - pid
+    k_idx = tl.floor((tl.sqrt(8.0 * inv_pid.to(tl.float32) + 1.0) - 1.0) * 0.5).to(tl.int32)
+    tri = k_idx * (k_idx + 1) // 2
+    k_idx = tl.where(tri > inv_pid, k_idx - 1, k_idx)
+    tri = k_idx * (k_idx + 1) // 2
+    k_idx = tl.where(tri + k_idx + 1 <= inv_pid, k_idx + 1, k_idx)
+    tri = k_idx * (k_idx + 1) // 2
 
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_SIZE_M)
-
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
-
-    # Only compute upper triangle (including diagonal)
-    if pid_m > pid_n:
-        return
+    pid_m = num_pid_m - 1 - k_idx
+    pid_n = num_pid_m - 1 - (inv_pid - tri)
 
     offs_xm = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_xn = (pid_n * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
@@ -132,10 +129,9 @@ def gram_(d_in: torch.Tensor, d_out: torch.Tensor) -> None:
 
     B = x.shape[0]
 
-    grid = lambda META: (
-        triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(M, META["BLOCK_SIZE_M"]),
-        B,
-    )
+    def grid(META):
+        num_pid_m = triton.cdiv(M, META["BLOCK_SIZE_M"])
+        return (num_pid_m * (num_pid_m + 1) // 2, B)
 
     with torch.cuda.device(d_in.device.index):
         gram_nd[grid](
