@@ -193,6 +193,22 @@ def test_zeropower_returns_bfloat16(strategy: OrthogonalizationStrategy) -> None
     assert out.dtype is torch.bfloat16
 
 
+@pytest.mark.parametrize("strategy", STRATEGIES)
+def test_zeropower_and_foreach_default_use_triton_falls_back_on_cpu(
+    strategy: OrthogonalizationStrategy,
+) -> None:
+    G = torch.randn(16, 8, dtype=torch.float32)
+
+    out_single = zeropower(G, strategy=strategy)
+    out_batch = foreach_zeropower([G], strategy=strategy)
+
+    assert out_single.device.type == "cpu"
+    assert out_single.dtype is torch.bfloat16
+    assert len(out_batch) == 1
+    assert out_batch[0].device.type == "cpu"
+    assert out_batch[0].dtype is torch.bfloat16
+
+
 def test_foreach_zeropower_mixed_shapes_raise() -> None:
     with pytest.raises(RuntimeError, match="stack"):
         foreach_zeropower(

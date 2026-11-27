@@ -88,8 +88,8 @@ def zeropower(
     """
     _validate_orthogonalization_args(strategy, steps)
 
-    # Select the orthogonalization function
-    orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton)
+    # Select the orthogonalization function (Triton Gram kernel is CUDA-only)
+    orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton and G.is_cuda)
 
     if isinstance(G, DTensor):
         X = G.full_tensor()
@@ -134,7 +134,9 @@ def foreach_zeropower(
     """
     _validate_orthogonalization_args(strategy, steps)
 
-    orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton)
+    # Validate strategy before indexing Gs so bogus strategies always raise ValueError
+    _get_orthogonalization_fn(strategy, False)
+    orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton and Gs[0].is_cuda)
 
     if isinstance(Gs[0], DTensor):
         Gs = cast(list[DTensor], Gs)
@@ -190,7 +192,7 @@ def foreach_zeropower_3d_fsdp(
         "foreach_zeropower_3d_fsdp only works for DTensors that are *only* sharded along the first dimension"
     )
 
-    orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton)
+    orthogonalize_fn = _get_orthogonalization_fn(strategy, use_triton and Gs[0].is_cuda)
     metadata = get_dtensor_metadata(Gs)
 
     # List[B, G_shard, N, M], distributed across G shards
