@@ -461,3 +461,24 @@ def test_foreach_nesterov_does_not_mutate_grad(
     ).step()
 
     torch.testing.assert_close(p.grad, expected_grad, rtol=0, atol=0)
+
+
+def test_foreach_muon_runs_wd_and_lr_scaling_in_fp32(monkeypatch) -> None:
+    monkeypatch.setattr(
+        optim_module,
+        "move_tensors_to_device",
+        lambda tensors, _src, _dst: tensors,
+    )
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g.bfloat16())
+    monkeypatch.setattr(algo_base, "foreach_zeropower", lambda gs, **_: [g.bfloat16() for g in gs])
+    torch.manual_seed(0)
+    ref_p = nn.Parameter(torch.randn(8, 4, dtype=torch.float32))
+    fe_p = nn.Parameter(ref_p.detach().clone())
+    grad = torch.randn(8, 4, dtype=torch.float32)
+    ref_p.grad = grad.clone()
+    fe_p.grad = grad.clone()
+
+    Muon([ref_p], foreach=False, lr=1e-4, wd=0.1, momentum=0.0, nesterov=False).step()
+    Muon([fe_p], foreach=True, lr=1e-4, wd=0.1, momentum=0.0, nesterov=False).step()
+
+    torch.testing.assert_close(fe_p.detach(), ref_p.detach(), rtol=1e-6, atol=1e-7)

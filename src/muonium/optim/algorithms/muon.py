@@ -122,14 +122,14 @@ class MuonBaseline(MuonAlgorithm):
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
         )
-        u = [u_.view_as(p_) for u_, p_ in zip(u, p, strict=True)]
+        u = [u_.to(torch.float32).view_as(p_) for u_, p_ in zip(u, p, strict=True)]
 
         # Apply weight decay into the update direction (mirrors the per-tensor
         # reference).
         if weight_decay != 0:
             if cautious_wd:
                 # u += weight_decay * p, only where u * p > 0
-                mask = [(u_ * p_ > 0).to(p_.dtype) for u_, p_ in zip(u, p, strict=True)]
+                mask = [(u_ * p_ > 0).to(torch.float32) for u_, p_ in zip(u, p, strict=True)]
                 masked_p = torch._foreach_mul(p, mask)
                 torch._foreach_add_(u, masked_p, alpha=weight_decay)
             else:
