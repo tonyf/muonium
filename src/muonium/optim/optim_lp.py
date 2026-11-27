@@ -4,6 +4,8 @@ try:
 except ImportError:
     raise ImportError("Please install `torchao` package to use low-precision optimizers")
 
+import warnings
+
 import torch
 from torch import Tensor
 from torch.distributed.tensor import DTensor
@@ -72,11 +74,17 @@ class MuonLP(Muon):
         )
         self.block_size = block_size
         self.bf16_stochastic_round = bf16_stochastic_round
+        if bf16_stochastic_round:
+            warnings.warn(
+                "bf16_stochastic_round is not yet implemented in MuonLP and has no effect.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     @staticmethod
     def _subclass_zeros(p: Tensor, signed: bool, block_size: int) -> Tensor:
         """Override in subclasses to use quantized storage."""
-        return torch.zeros_like(p)
+        return torch.zeros_like(p, dtype=torch.float32)
 
     def _new_buffer(self, p: Tensor, signed: bool) -> Tensor:
         """Create a buffer, potentially quantized and DTensor-wrapped."""
@@ -86,7 +94,7 @@ class MuonLP(Muon):
         if local_p.numel() >= 4096 and local_p.numel() % self.block_size == 0:
             out = self._subclass_zeros(local_p, signed, self.block_size)
         else:
-            out = torch.zeros_like(local_p)
+            out = torch.zeros_like(local_p, dtype=torch.float32)
 
         # Wrap in DTensor if needed
         if isinstance(p, DTensor):
@@ -105,13 +113,13 @@ class MuonLP(Muon):
         """Allocate algorithm state through the quantizing ``_new_buffer`` path.
 
         Grad-shaped buffers (e.g. the momentum buffer) are built from the
-        parameter via ``_new_buffer`` — quantized when eligible and re-wrapped as
-        DTensors. Row-shaped buffers (``like="grad_rows"``) are tiny (one value
-        per neuron), far below the quantization threshold, so they use the plain
-        fp32 allocation.
+        (possibly reshaped) gradient via ``_new_buffer`` — quantized when
+        eligible and re-wrapped as DTensors. Row-shaped buffers
+        (``like="grad_rows"``) are tiny (one value per neuron), far below the
+        quantization threshold, so they use the plain fp32 allocation.
         """
         if spec.like == "grad":
-            return self._new_buffer(p, signed=spec.signed)
+            return self._new_buffer(grad, signed=spec.signed)
         return super()._new_state_buffer(p, grad, spec)
 
 

@@ -223,8 +223,26 @@ def test_quantized_subclasses_step_once_cpu(optimizer_cls, _state_cls) -> None:
 
 
 @requires_torchao
-def test_bf16_stochastic_round_is_constructor_state_only() -> None:
+def test_bf16_stochastic_round_warns_and_is_constructor_state_only() -> None:
     p = nn.Parameter(torch.randn(32, 32))
-    opt = Muon8bit([p], bf16_stochastic_round=True)
+    with pytest.warns(UserWarning, match="not yet implemented"):
+        opt = Muon8bit([p], bf16_stochastic_round=True)
 
     assert opt.bf16_stochastic_round is True
+
+
+@requires_torchao
+@pytest.mark.parametrize(("shape", "flatten", "expected_shape"), [
+    ((4, 3, 2, 2), True, (4, 12)),
+    ((2, 3, 4, 4), False, (6, 4, 4)),
+])
+def test_muon_lp_state_buffer_matches_reshaped_grad(
+    shape: tuple[int, ...], flatten: bool, expected_shape: tuple[int, ...]
+) -> None:
+    p = nn.Parameter(torch.randn(*shape))
+    p.grad = torch.randn_like(p)
+    opt = MuonLP([{"params": [p], "flatten": flatten}], lr=0.1, wd=0.0)
+
+    opt.step()
+
+    assert opt.state[p]["momentum_buffer"].shape == expected_shape
