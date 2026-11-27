@@ -18,6 +18,10 @@ class MuonBaseline(MuonAlgorithm):
 
     name = "muon"
 
+    def weight_decay_scale(self, lr: Tensor, **opts) -> Tensor | None:
+        """Extra multiplier on ``weight_decay`` (``None`` = 1); see :class:`MuonC`."""
+        return None
+
     def update(
         self,
         param: Tensor,
@@ -69,10 +73,12 @@ class MuonBaseline(MuonAlgorithm):
         adjusted_lr = lr_ratio * lr
         update = adjusted_lr * u
         if weight_decay != 0:
+            scale = self.weight_decay_scale(lr, **opts)
+            wd_lr = lr * weight_decay if scale is None else lr * weight_decay * scale
             if cautious_wd:
-                update = update + (lr * weight_decay) * param_fp32 * (u * param_fp32 > 0)
+                update = update + wd_lr * param_fp32 * (u * param_fp32 > 0)
             else:
-                update = update + (lr * weight_decay) * param_fp32
+                update = update + wd_lr * param_fp32
 
         param.copy_(param_fp32 - update)
 
@@ -126,9 +132,10 @@ class MuonBaseline(MuonAlgorithm):
 
         # Scale update direction by adjusted_lr; decoupled weight decay uses raw lr.
         if weight_decay != 0:
-            wd_scale = lr * weight_decay
+            scale = self.weight_decay_scale(lr, **opts)
+            wd_scale = lr * weight_decay if scale is None else lr * weight_decay * scale
             if cautious_wd:
-                # decay += lr * weight_decay * p, only where u * p > 0
+                # decay += wd_scale * p, only where u * p > 0
                 mask = [(u_ * p_ > 0).to(torch.float32) for u_, p_ in zip(u, p, strict=True)]
                 torch._foreach_mul_(u, adjusted_lr)
                 wd_term = torch._foreach_mul(p, mask)
@@ -142,3 +149,28 @@ class MuonBaseline(MuonAlgorithm):
             torch._foreach_mul_(u, adjusted_lr)
 
         torch._foreach_add_(p, u, alpha=-1)
+
+
+@register_muon_algorithm
+class MuonC(MuonBaseline):
+    """Muon with corrected weight decay, from https://arxiv.org/abs/2506.02285.
+
+    Weight decay is scaled by ``lr / max_lr``, so the per-step decay is
+    ``lr^2 / max_lr * wd`` instead of ``lr * wd`` (Algorithm 1's "corrected weight
+    decay", the AdamC rule applied to Muon). With a decaying schedule this keeps the
+    steady-state weight norm of normalized layers from collapsing toward the end of
+    training. ``max_lr`` defaults to the group's ``lr`` at construction; set it to the
+    schedule's peak if the initial ``lr`` is not the maximum.
+    """
+
+    name = "muonc"
+    options = {"max_lr": None}
+
+    def resolve_options(self, group: dict) -> None:
+        if group["max_lr"] is None:
+            group["max_lr"] = float(group["lr"])
+        if not group["max_lr"] > 0:
+            raise ValueError(f"muonc requires max_lr > 0, got {group['max_lr']}")
+
+    def weight_decay_scale(self, lr: Tensor, max_lr: float = 1.0, **opts) -> Tensor:
+        return lr / max_lr
