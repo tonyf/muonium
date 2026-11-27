@@ -105,7 +105,8 @@ class MuonBaseline(MuonAlgorithm):
         torch._foreach_add_(buf, g)
 
         if nesterov:
-            torch._foreach_add_(g, buf, alpha=momentum)
+            # Out-of-place: avoids mutating p.grad and promotes bf16/fp16 grads to fp32.
+            g = list(torch._foreach_add(g, buf, alpha=momentum))
         else:
             g = buf
 

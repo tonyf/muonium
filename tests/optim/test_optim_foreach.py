@@ -433,3 +433,31 @@ def test_foreach_maximize_reused_grad_keeps_maximize_direction(monkeypatch) -> N
     torch.testing.assert_close(grad, torch.full_like(grad, 0.5))
     torch.testing.assert_close(after_first, torch.full_like(after_first, 1.05))
     torch.testing.assert_close(p, torch.full_like(p, 1.10))
+
+
+@pytest.mark.parametrize("algorithm", ["muon", "normuon", "muonh"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_foreach_nesterov_does_not_mutate_grad(
+    monkeypatch, algorithm: str, dtype: torch.dtype
+) -> None:
+    monkeypatch.setattr(
+        optim_module,
+        "move_tensors_to_device",
+        lambda tensors, _src, _dst: tensors,
+    )
+    monkeypatch.setattr(algo_base, "foreach_zeropower", lambda gs, **_: [g.clone() for g in gs])
+    p = nn.Parameter(torch.randn(4, 4, dtype=dtype))
+    grad = torch.randn(4, 4, dtype=dtype)
+    expected_grad = grad.clone()
+    p.grad = grad
+
+    Muon(
+        [{"params": [p], "algorithm": algorithm}],
+        foreach=True,
+        lr=0.1,
+        wd=0.0,
+        momentum=0.9,
+        nesterov=True,
+    ).step()
+
+    torch.testing.assert_close(p.grad, expected_grad, rtol=0, atol=0)

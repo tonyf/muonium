@@ -579,13 +579,10 @@ class Muon(torch.optim.Optimizer):
                     **opts,
                 )
 
-                # CPU offload mutates CUDA copies; copy those values back to the
-                # original tensors. Same-device batches alias and need no copy.
-                moved_pairs = [
-                    (batch_p_orig, batch_p),
-                    (batch_g_orig, batch_g),
-                    (batch_lr_orig, batch_lr),
-                ]
+                # CPU offload mutates CUDA copies of params and state; copy those
+                # back to the original tensors. Grads and lr_ratios are read-only,
+                # and same-device batches alias and need no copy.
+                moved_pairs = [(batch_p_orig, batch_p)]
                 moved_pairs.extend(
                     (batch_state_orig[key], batch_state[key]) for key in batch_state_orig
                 )
