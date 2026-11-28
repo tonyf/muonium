@@ -38,7 +38,7 @@ def _orthogonal_gram(x: torch.Tensor) -> torch.Tensor:
 
 
 def _normalized_pe_input(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    return x / (x.norm(dim=(-2, -1), keepdim=True) * 1.02 + eps)
+    return x / (x.norm(dim=(-2, -1), keepdim=True) * 1.02).clamp_min(eps)
 
 
 @requires_cuda
@@ -190,3 +190,18 @@ def test_pe_loop_2d_compiles_correctly() -> None:
         max_mismatch_pct=MAX_MISMATCH_PCT,
         benchmark=False,
     )
+
+
+def test_pe_vanishing_norm_uses_clamp_min_without_shrinkage() -> None:
+    torch.manual_seed(8)
+    X = torch.randn(32, 16, dtype=torch.float32)
+    X = X / X.norm() * 1e-5
+
+    normed = eager(pe_loop)(X, 0, eps=1e-6)
+    torch.testing.assert_close(
+        normed.norm(), torch.tensor(1.0 / 1.02), rtol=1e-6, atol=1e-6
+    )
+
+    out_small = eager(pe_loop)(X, 5, eps=1e-6)
+    out_unit = eager(pe_loop)(X * 1e5, 5, eps=1e-6)
+    torch.testing.assert_close(out_small, out_unit, rtol=1e-5, atol=1e-6)

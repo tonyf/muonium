@@ -15,14 +15,16 @@ from torch import Tensor
 
 from muonium.kernels.gram import gram_
 
+from .newton_schulz import _fused_addmm
+
 # Polar Express coefficients from https://arxiv.org/pdf/2505.16932
-POLAR_EXPRESS_COEFFS = [
+POLAR_EXPRESS_COEFFS: tuple[tuple[float, float, float], ...] = (
     (8.156554524902461, -22.48329292557795, 15.878769915207462),
     (4.042929935166739, -2.808917465908714, 0.5000178451051316),
     (3.8916678022926607, -2.772484153217685, 0.5060648178503393),
     (3.285753657755655, -2.3681294933425376, 0.46449024233003106),
     (2.3465413258596377, -1.7097828382687081, 0.42323551169305323),
-]
+)
 
 
 @torch.compile(fullgraph=True)
@@ -53,14 +55,12 @@ def pe_loop(
     if transpose:
         X = X.transpose(-2, -1)
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + eps)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02).clamp_min(eps)
 
     for a, b, c in POLAR_EXPRESS_COEFFS[:steps]:
         A = torch.matmul(X, X.transpose(-1, -2))
-        # Out-of-place accumulation: the in-place add_ form miscompiles under
-        # torch.compile for 2D inputs (Inductor functionalization aliasing bug).
-        B = b * A + c * torch.matmul(A, A)
-        X = a * X + B @ X
+        B = _fused_addmm(A, A, A, beta=b, alpha=c)
+        X = _fused_addmm(X, B, X, beta=a)
 
     if transpose:
         X = X.transpose(-2, -1)
@@ -88,7 +88,7 @@ def pe_loop_triton(
         # not copy X on every iteration and B @ X sees contiguous operands.
         X = X.mT.contiguous()
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02 + eps)
+    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02).clamp_min(eps)
 
     M = X.size(-2)
     buf_shape = (*X.shape[:-2], M, M)
@@ -105,7 +105,7 @@ def pe_loop_triton(
         # B := B = b*A + c*A^2   (reuse B storage)
         B.mul_(c).add_(A, alpha=b)
 
-        X = a * X + B @ X
+        X = _fused_addmm(X, B, X, beta=a)
 
     if transpose:
         X = X.mT

@@ -13,6 +13,38 @@ from torch import Tensor
 from muonium.kernels.gram import gram_
 
 
+def _fused_addmm(
+    input: Tensor,
+    mat1: Tensor,
+    mat2: Tensor,
+    *,
+    beta: float = 1.0,
+    alpha: float = 1.0,
+) -> Tensor:
+    """Compute ``beta * input + alpha * (mat1 @ mat2)`` via out-of-place addmm/baddbmm.
+
+    Handles 2D (``addmm``), 3D (``baddbmm``), and 4D+ (flattening leading batch
+    dims into 3D ``baddbmm`` and restoring shape) so cuBLAS accumulates the
+    epilogue in FP32 before rounding to BF16 once. Out-of-place avoids the
+    Inductor 2D functionalization aliasing bug.
+    """
+    if input.ndim == 2:
+        return torch.addmm(input, mat1, mat2, beta=beta, alpha=alpha)
+    if input.ndim == 3:
+        return torch.baddbmm(input, mat1, mat2, beta=beta, alpha=alpha)
+    batch_shape = input.shape[:-2]
+    m, n = input.shape[-2], input.shape[-1]
+    k = mat1.shape[-1]
+    out = torch.baddbmm(
+        input.reshape(-1, m, n),
+        mat1.reshape(-1, m, k),
+        mat2.reshape(-1, k, n),
+        beta=beta,
+        alpha=alpha,
+    )
+    return out.reshape(*batch_shape, m, n)
+
+
 @torch.compile(fullgraph=True)
 def ns_loop(
     X: Annotated[Tensor, "B N M"],
@@ -42,14 +74,12 @@ def ns_loop(
     if transpose:
         X = X.transpose(-2, -1)
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
+    X = X / X.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
 
     for _ in range(steps):
         A = torch.matmul(X, X.transpose(-1, -2))
-        # Out-of-place accumulation: the in-place add_ form miscompiles under
-        # torch.compile for 2D inputs (Inductor functionalization aliasing bug).
-        B = b * A + c * torch.matmul(A, A)
-        X = a * X + torch.matmul(B, X)
+        B = _fused_addmm(A, A, A, beta=b, alpha=c)
+        X = _fused_addmm(X, B, X, beta=a)
 
     if transpose:
         X = X.transpose(-2, -1)
@@ -81,7 +111,7 @@ def ns_loop_triton(
         X = X.mT.contiguous()
 
     # Ensure spectral norm <= 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + eps)
+    X = X / X.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
 
     M = X.size(-2)
     buf_shape = (*X.shape[:-2], M, M)
@@ -98,7 +128,7 @@ def ns_loop_triton(
         # B := B = b*A + c*A^2   (reuse B storage)
         B.mul_(c).add_(A, alpha=b)
 
-        X = a * X + B @ X
+        X = _fused_addmm(X, B, X, beta=a)
 
     if transpose:
         X = X.mT

@@ -37,7 +37,7 @@ def _orthogonal_gram(x: torch.Tensor) -> torch.Tensor:
 
 
 def _normalized_ns_input(x: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-    return x / (x.norm(dim=(-2, -1), keepdim=True) + eps)
+    return x / x.norm(dim=(-2, -1), keepdim=True).clamp_min(eps)
 
 
 @requires_cuda
@@ -193,3 +193,41 @@ def test_ns_loop_2d_compiles_correctly() -> None:
         max_mismatch_pct=MAX_MISMATCH_PCT,
         benchmark=False,
     )
+
+
+def test_ns_vanishing_norm_uses_clamp_min_without_shrinkage() -> None:
+    torch.manual_seed(8)
+    X = torch.randn(32, 16, dtype=torch.float32)
+    X = X / X.norm() * 1e-6
+
+    # steps=0 should normalize to exact unit norm when ||X||_F >= eps (1e-7).
+    normed = eager(ns_loop)(X, 0, eps=1e-7)
+    torch.testing.assert_close(normed.norm(), torch.tensor(1.0), rtol=1e-6, atol=1e-6)
+
+    # steps=5 should match a unit-norm input (no +eps directional distortion).
+    out_small = eager(ns_loop)(X, 5, eps=1e-7)
+    out_unit = eager(ns_loop)(X * 1e6, 5, eps=1e-7)
+    torch.testing.assert_close(out_small, out_unit, rtol=1e-5, atol=1e-6)
+
+
+def test_ns_loop_handles_4d_batches() -> None:
+    torch.manual_seed(9)
+    X = torch.randn(2, 3, 16, 8, dtype=torch.bfloat16)
+    out = eager(ns_loop)(X, 3)
+    ref = eager(ns_loop)(X.reshape(6, 16, 8), 3).reshape(2, 3, 16, 8)
+    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+
+@requires_cuda
+@pytest.mark.parametrize("shape", [(512, 1536), (1536, 512)])
+def test_ns_fused_addmm_tracks_fp32_reference_closely(shape: tuple[int, int]) -> None:
+    torch.manual_seed(0)
+    X_fp32 = torch.randn(*shape, device="cuda", dtype=torch.float32)
+    ref_fp32 = eager(ns_loop)(X_fp32, 5)
+    out_torch = ns_loop(X_fp32.bfloat16(), 5).float()
+    out_triton = ns_loop_triton(X_fp32.bfloat16(), 5).float()
+
+    rel_torch = (out_torch - ref_fp32).norm() / ref_fp32.norm()
+    rel_triton = (out_triton - ref_fp32).norm() / ref_fp32.norm()
+    assert rel_torch < 0.02
+    assert rel_triton < 0.02
