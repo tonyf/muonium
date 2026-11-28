@@ -16,6 +16,9 @@ from muonium.orthogonalize import (
     zeropower,
 )
 
+AdjustLrFn = Literal["original", "spectral_unclamped", "match_rms_adamw"]
+_VALID_ADJUST_LR_FNS = frozenset({"original", "spectral_unclamped", "match_rms_adamw"})
+
 # Group keys owned by the optimizer itself; algorithm options may not shadow them.
 RESERVED_GROUP_KEYS = frozenset(
     {
@@ -29,6 +32,7 @@ RESERVED_GROUP_KEYS = frozenset(
         "nesterov",
         "ns_steps",
         "orthogonalization_strategy",
+        "adjust_lr_fn",
         "maximize",
         "flatten",
         "foreach",
@@ -53,20 +57,56 @@ class BufferSpec:
     signed: bool = True
 
 
+def resolve_adjust_lr_fn(adjust_lr_fn: AdjustLrFn | None) -> AdjustLrFn:
+    """Validate and normalize ``adjust_lr_fn`` (``None`` maps to ``"original"``)."""
+    if adjust_lr_fn is None:
+        return "original"
+    if adjust_lr_fn not in _VALID_ADJUST_LR_FNS:
+        raise ValueError(
+            f"Unknown adjust_lr_fn: {adjust_lr_fn!r}. "
+            f"Expected one of {sorted(_VALID_ADJUST_LR_FNS)}."
+        )
+    return adjust_lr_fn
+
+
+def compute_lr_ratio(
+    rows: int, cols: int, adjust_lr_fn: AdjustLrFn = "original"
+) -> float:
+    """Compute the shape-based LR multiplier for a ``(rows, cols)`` weight matrix.
+
+    - ``"original"``: ``sqrt(max(1, rows / cols))`` (Keller Jordan's Muon).
+    - ``"spectral_unclamped"``: ``sqrt(rows / cols)`` (unclamped spectral scaling).
+    - ``"match_rms_adamw"``: ``0.2 * sqrt(max(rows, cols))`` (Moonshot AI / Kimi).
+    """
+    if adjust_lr_fn == "original":
+        return math.sqrt(max(1.0, rows / cols))
+    if adjust_lr_fn == "spectral_unclamped":
+        return math.sqrt(rows / cols)
+    if adjust_lr_fn == "match_rms_adamw":
+        return 0.2 * math.sqrt(max(rows, cols))
+    raise ValueError(
+        f"Unknown adjust_lr_fn: {adjust_lr_fn!r}. "
+        f"Expected one of {sorted(_VALID_ADJUST_LR_FNS)}."
+    )
+
+
 def split_lr_scales(
-    shape: torch.Size | tuple[int, ...], split_sizes: tuple[int, ...]
+    shape: torch.Size | tuple[int, ...],
+    split_sizes: tuple[int, ...],
+    adjust_lr_fn: AdjustLrFn = "original",
 ) -> tuple[float, ...]:
     """Per-row-block LR corrections for a fused 2D weight split via ``split_sizes``.
 
     The optimizer scales the whole update by the full matrix's cached
-    ``lr_ratio = sqrt(max(1, N/M))``. Each independently orthogonalized row block
-    should instead see the adjustment its own shape would receive as a separate
-    parameter, so each block is pre-scaled by ``ratio(block) / ratio(full)``.
+    ``lr_ratio``. Each independently orthogonalized row block should instead see
+    the adjustment its own shape would receive as a separate parameter, so each
+    block is pre-scaled by ``ratio(block) / ratio(full)``.
     """
     rows, cols = shape[-2], shape[-1]
-    full_ratio = math.sqrt(max(1.0, rows / cols))
+    full_ratio = compute_lr_ratio(rows, cols, adjust_lr_fn)
     return tuple(
-        math.sqrt(max(1.0, block_rows / cols)) / full_ratio for block_rows in split_sizes
+        compute_lr_ratio(block_rows, cols, adjust_lr_fn) / full_ratio
+        for block_rows in split_sizes
     )
 
 
@@ -106,6 +146,7 @@ def orthogonalize_single(
     strategy: OrthogonalizationStrategy,
     split_sizes: tuple[int, ...] | None = None,
     apply_lr_scales: bool = True,
+    adjust_lr_fn: AdjustLrFn = "original",
 ):
     """Orthogonalize one tensor. DTensor handling lives inside ``zeropower``.
 
@@ -119,7 +160,9 @@ def orthogonalize_single(
     if split_sizes is None:
         return zeropower(g, steps=ns_steps, strategy=strategy)
 
-    scales = split_lr_scales(g.shape, split_sizes) if apply_lr_scales else None
+    scales = (
+        split_lr_scales(g.shape, split_sizes, adjust_lr_fn) if apply_lr_scales else None
+    )
     if isinstance(g, DTensor):
         u = _split_orthogonalize_full(
             cast(DTensor, g.bfloat16()).full_tensor(),
@@ -134,7 +177,9 @@ def orthogonalize_single(
             placements=(Replicate(),) * g.device_mesh.ndim,
         )
         return u_replicated.redistribute(placements=g.placements, async_op=True)
-    return _split_orthogonalize_full(g, split_sizes, scales, ns_steps=ns_steps, strategy=strategy)
+    return _split_orthogonalize_full(
+        g, split_sizes, scales, ns_steps=ns_steps, strategy=strategy
+    )
 
 
 def orthogonalize_batch(
@@ -144,6 +189,7 @@ def orthogonalize_batch(
     strategy: OrthogonalizationStrategy,
     split_sizes: tuple[int, ...] | None = None,
     apply_lr_scales: bool = True,
+    adjust_lr_fn: AdjustLrFn = "original",
 ) -> list[Tensor]:
     """Orthogonalize a same-shape batch, preferring the FSDP local-shard fast path.
 
@@ -161,10 +207,15 @@ def orthogonalize_batch(
                     strategy=strategy,
                     split_sizes=split_sizes,
                     apply_lr_scales=apply_lr_scales,
+                    adjust_lr_fn=adjust_lr_fn,
                 )
                 for g in gs
             ]
-        scales = split_lr_scales(gs[0].shape, split_sizes) if apply_lr_scales else None
+        scales = (
+            split_lr_scales(gs[0].shape, split_sizes, adjust_lr_fn)
+            if apply_lr_scales
+            else None
+        )
         all_blocks = [list(g.split(list(split_sizes), dim=-2)) for g in gs]
         by_height: dict[int, list[tuple[int, int]]] = {}
         for layer_idx, blocks in enumerate(all_blocks):
@@ -246,6 +297,7 @@ class MuonAlgorithm(ABC):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        adjust_lr_fn: AdjustLrFn = "original",
         **opts,
     ) -> None:
         """Per-tensor fp32 reference update; mutates ``param`` and ``state`` in place.
@@ -270,6 +322,7 @@ class MuonAlgorithm(ABC):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        adjust_lr_fn: AdjustLrFn = "original",
         **opts,
     ) -> None:
         """Batched update over same-(device, dtype, shape) tensors.
@@ -294,6 +347,7 @@ class MuonAlgorithm(ABC):
                 ns_steps=ns_steps,
                 orthogonalization_strategy=orthogonalization_strategy,
                 split_sizes=split_sizes,
+                adjust_lr_fn=adjust_lr_fn,
                 **opts,
             )
 

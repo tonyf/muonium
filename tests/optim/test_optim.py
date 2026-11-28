@@ -616,6 +616,7 @@ def test_load_state_dict_applies_legacy_defaults_and_tensor_steps():
         "flatten",
         "use_cautious_wd",
         "orthogonalization_strategy",
+        "adjust_lr_fn",
         "maximize",
     ]:
         del group[key]
@@ -632,6 +633,7 @@ def test_load_state_dict_applies_legacy_defaults_and_tensor_steps():
     # Legacy default matches the constructor default ("polar_express"), so a
     # checkpoint missing the key doesn't silently switch the orthogonalization scheme.
     assert group["orthogonalization_strategy"] == "polar_express"
+    assert group["adjust_lr_fn"] == "original"
     lr = group["lr"]
     assert isinstance(lr, torch.Tensor)
     assert torch.equal(lr, torch.tensor(0.1))
@@ -739,3 +741,78 @@ def test_mixed_muon_and_adam_groups_step_on_cpu(monkeypatch):
 
     torch.testing.assert_close(muon_param, torch.full_like(muon_param, 0.95))
     torch.testing.assert_close(adam_param, adam_ref)
+
+
+@pytest.mark.parametrize(
+    ("adjust_lr_fn", "shape", "expected_ratio"),
+    [
+        ("original", (512, 1536), 1.0),
+        (None, (512, 1536), 1.0),
+        ("spectral_unclamped", (512, 1536), math.sqrt(512 / 1536)),
+        ("match_rms_adamw", (512, 1536), 0.2 * math.sqrt(1536)),
+        ("original", (1536, 512), math.sqrt(3.0)),
+        ("spectral_unclamped", (1536, 512), math.sqrt(3.0)),
+        ("match_rms_adamw", (1536, 512), 0.2 * math.sqrt(1536)),
+        ("original", (4, 4), 1.0),
+        ("spectral_unclamped", (4, 4), 1.0),
+        ("match_rms_adamw", (4, 4), 0.2 * math.sqrt(4)),
+        ("spectral_unclamped", (2, 4, 8), math.sqrt(4 / 8)),
+        ("match_rms_adamw", (2, 4, 8), 0.2 * math.sqrt(8)),
+    ],
+)
+def test_adjust_lr_fn_scales_muon_update(monkeypatch, adjust_lr_fn, shape, expected_ratio):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    p = torch.nn.Parameter(torch.ones(shape))
+    p.grad = torch.full_like(p, 0.5)
+    lr = 0.1
+    optimizer = Muon(
+        [p],
+        lr=lr,
+        wd=0.0,
+        momentum=0.0,
+        nesterov=False,
+        adjust_lr_fn=adjust_lr_fn,
+    )
+
+    optimizer.step()
+
+    expected_name = "original" if adjust_lr_fn is None else adjust_lr_fn
+    assert optimizer.param_groups[0]["adjust_lr_fn"] == expected_name
+    torch.testing.assert_close(optimizer.state[p]["lr_ratio"], torch.tensor(expected_ratio))
+    torch.testing.assert_close(p, torch.full_like(p, 1.0 - lr * expected_ratio * 0.5))
+
+
+def test_adjust_lr_fn_per_group_override_and_validation(monkeypatch):
+    monkeypatch.setattr(algo_base, "zeropower", lambda g, **_: g)
+    p_orig = torch.nn.Parameter(torch.ones(4, 12))
+    p_spec = torch.nn.Parameter(torch.ones(4, 12))
+    p_rms = torch.nn.Parameter(torch.ones(4, 12))
+    for p in (p_orig, p_spec, p_rms):
+        p.grad = torch.full_like(p, 0.5)
+
+    optimizer = Muon(
+        [
+            {"params": [p_orig]},
+            {"params": [p_spec], "adjust_lr_fn": "spectral_unclamped"},
+            {"params": [p_rms], "adjust_lr_fn": "match_rms_adamw"},
+        ],
+        lr=0.1,
+        wd=0.0,
+        momentum=0.0,
+        nesterov=False,
+        adjust_lr_fn="original",
+    )
+    optimizer.step()
+
+    torch.testing.assert_close(optimizer.state[p_orig]["lr_ratio"], torch.tensor(1.0))
+    torch.testing.assert_close(
+        optimizer.state[p_spec]["lr_ratio"], torch.tensor(math.sqrt(4 / 12))
+    )
+    torch.testing.assert_close(
+        optimizer.state[p_rms]["lr_ratio"], torch.tensor(0.2 * math.sqrt(12))
+    )
+
+    with pytest.raises(ValueError, match="Unknown adjust_lr_fn"):
+        Muon([torch.nn.Parameter(torch.randn(4, 4))], adjust_lr_fn="bogus")  # ty: ignore[invalid-argument-type]
+    with pytest.raises(ValueError, match="Unknown adjust_lr_fn"):
+        Muon([{"params": [torch.nn.Parameter(torch.randn(4, 4))], "adjust_lr_fn": "bogus"}])

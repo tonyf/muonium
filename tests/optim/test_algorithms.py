@@ -1005,3 +1005,75 @@ def test_adamc_defaults_and_validation():
         Muon([{"params": [p], "algorithm": "adamc", "decoupled_weight_decay": False}])
     with pytest.raises(ValueError, match="max_lr > 0"):
         Muon([{"params": [p], "algorithm": "adamc", "max_lr": -1.0}])
+
+
+# --- adjust_lr_fn + split_sizes ------------------------------------------------------
+
+
+@pytest.mark.parametrize("algorithm", ["muon", "normuon"])
+@pytest.mark.parametrize(
+    "adjust_lr_fn", ["original", "spectral_unclamped", "match_rms_adamw"]
+)
+@pytest.mark.parametrize("foreach", [False, pytest.param(True, marks=requires_cuda)])
+def test_split_sizes_matches_separate_params_for_all_adjust_lr_fns(
+    monkeypatch, algorithm, adjust_lr_fn, foreach
+):
+    _stub_zeropower(monkeypatch)
+    torch.manual_seed(0)
+    split_sizes = (4, 2, 2)
+    cols = 12
+    blocks = [torch.randn(rows, cols) for rows in split_sizes]
+    grads = [torch.randn(rows, cols) for rows in split_sizes]
+
+    fused_p = nn.Parameter(torch.cat(blocks, dim=0).clone())
+    sep_ps = [nn.Parameter(b.clone()) for b in blocks]
+    fused_p.grad = torch.cat(grads, dim=0).clone()
+    for p, g in zip(sep_ps, grads, strict=True):
+        p.grad = g.clone()
+
+    common: dict[str, Any] = dict(
+        lr=0.05,
+        wd=0.1,
+        momentum=0.9,
+        nesterov=True,
+        adjust_lr_fn=adjust_lr_fn,
+        foreach=foreach,
+    )
+    fused_opt = Muon(
+        [{"params": [fused_p], "algorithm": algorithm, "split_sizes": split_sizes}],
+        **common,
+    )
+    sep_opt = Muon(
+        [{"params": sep_ps, "algorithm": algorithm}],
+        **common,
+    )
+
+    fused_opt.step()
+    sep_opt.step()
+
+    torch.testing.assert_close(
+        fused_p.detach(),
+        torch.cat([p.detach() for p in sep_ps], dim=0),
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_split_lr_scales_respects_adjust_lr_fn():
+    shape = (10, 12)
+    splits = (6, 2, 2)
+
+    # spectral_unclamped: sqrt(block_rows / cols) / sqrt(rows / cols) = sqrt(block_rows / rows)
+    spec = split_lr_scales(shape, splits, "spectral_unclamped")
+    assert spec == pytest.approx(tuple(math.sqrt(r / 10) for r in splits))
+
+    # match_rms_adamw: all blocks and full have max(r, 12) = 12, so ratios are all 1.0
+    rms_wide = split_lr_scales((10, 12), (6, 2, 2), "match_rms_adamw")
+    assert rms_wide == pytest.approx((1.0, 1.0, 1.0))
+
+    # match_rms_adamw when full is tall (20, 8) and blocks are (12, 4, 4):
+    # full = 0.2*sqrt(20), blocks = 0.2*sqrt(12), 0.2*sqrt(8), 0.2*sqrt(8)
+    rms_tall = split_lr_scales((20, 8), (12, 4, 4), "match_rms_adamw")
+    assert rms_tall == pytest.approx(
+        (math.sqrt(12 / 20), math.sqrt(8 / 20), math.sqrt(8 / 20))
+    )

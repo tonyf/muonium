@@ -5,6 +5,7 @@ from torch import Tensor
 from muonium.orthogonalize import OrthogonalizationStrategy
 
 from .base import (
+    AdjustLrFn,
     BufferSpec,
     MuonAlgorithm,
     orthogonalize_batch,
@@ -14,8 +15,12 @@ from .base import (
 )
 
 
-def _apply_split_scales(u: Tensor, split_sizes: tuple[int, ...]) -> Tensor:
-    scales = split_lr_scales(u.shape, split_sizes)
+def _apply_split_scales(
+    u: Tensor,
+    split_sizes: tuple[int, ...],
+    adjust_lr_fn: AdjustLrFn = "original",
+) -> Tensor:
+    scales = split_lr_scales(u.shape, split_sizes, adjust_lr_fn)
     return torch.cat(
         [
             block * scale
@@ -110,6 +115,7 @@ class NorMuon(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        adjust_lr_fn: AdjustLrFn = "original",
         muon_beta2: float = 0.95,
         **opts,
     ) -> None:
@@ -146,7 +152,7 @@ class NorMuon(MuonAlgorithm):
         )
         variance_neuron.copy_(v_new)
         if split_sizes is not None:
-            u = _apply_split_scales(u, split_sizes)
+            u = _apply_split_scales(u, split_sizes, adjust_lr_fn)
 
         u = u.view_as(param_fp32)
 
@@ -176,6 +182,7 @@ class NorMuon(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        adjust_lr_fn: AdjustLrFn = "original",
         muon_beta2: float = 0.95,
         **opts,
     ) -> None:
@@ -217,7 +224,7 @@ class NorMuon(MuonAlgorithm):
             u_, v_new = _normuon_normalize(u_, v.to(torch.float32), muon_beta2, split_sizes)
             v.copy_(v_new)
             if split_sizes is not None:
-                u_ = _apply_split_scales(u_, split_sizes)
+                u_ = _apply_split_scales(u_, split_sizes, adjust_lr_fn)
             normalized.append(u_)
         u = [u_.view_as(p_) for u_, p_ in zip(normalized, p, strict=True)]
 

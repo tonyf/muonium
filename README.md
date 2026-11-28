@@ -34,8 +34,8 @@ semi-orthogonal matrix (the matrix-sign, or "zero power", of the gradient) befor
 it. The orthogonalization is computed iteratively on the GPU, with two schemes available:
 classic Newton-Schulz iteration (backed by a fused Triton Gram-matrix kernel) and
 [Polar Express](https://arxiv.org/pdf/2505.16932), which uses precomputed coefficients for
-faster convergence. Learning rates are scaled by each matrix's shape
-(`sqrt(max(1, N/M))`) automatically.
+faster convergence. Learning rates are scaled by each matrix's shape automatically
+(configurable via `adjust_lr_fn`, defaulting to `sqrt(max(1, M/N))`).
 
 Muon only applies to weight matrices. A single `Muon` instance handles the remaining
 parameters (norms, biases, embeddings, the LM head) with PyTorch's fused Adam/AdamW,
@@ -111,6 +111,7 @@ supported.
 | `nesterov` | `True` | Use Nesterov momentum. |
 | `ns_steps` | `5` | Orthogonalization iteration steps. |
 | `orthogonalization_strategy` | `"polar_express"` | `"newton_schulz"` or `"polar_express"`. |
+| `adjust_lr_fn` | `"original"` | Shape-based LR scaling for Muon groups: `"original"` (`sqrt(max(1, M/N))`), `"spectral_unclamped"` (`sqrt(M/N)`), or `"match_rms_adamw"` (`0.2 * sqrt(max(M, N))`). `None` maps to `"original"`. |
 | `adam_betas` | `(0.9, 0.95)` | Betas for the Adam path. |
 | `is_adamw` | `True` | Decoupled (AdamW) vs. coupled weight decay for the Adam path. |
 | `fused_adam` | `None` | Select the fused Adam kernel explicitly; `None` uses PyTorch's default dispatch. |

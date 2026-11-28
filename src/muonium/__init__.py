@@ -1,6 +1,7 @@
 """muonium: a distributed-ready Muon optimizer built on PyTorch DTensor."""
 
 from .optim import (
+    AdjustLrFn,
     BufferSpec,
     Muon,
     MuonAlgorithm,
@@ -11,6 +12,7 @@ from .optim import (
 from .orthogonalize import OrthogonalizationStrategy
 
 __all__ = [
+    "AdjustLrFn",
     "BufferSpec",
     "Muon",
     "MuonAlgorithm",

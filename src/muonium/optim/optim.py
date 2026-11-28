@@ -1,5 +1,4 @@
 import functools
-import math
 from typing import cast
 
 import torch
@@ -15,8 +14,8 @@ from torch.optim.optimizer import (
 from muonium.orthogonalize import OrthogonalizationStrategy
 from muonium.utils import group_tensors_by_shape, move_tensors_to_device
 
-from .algorithms import BufferSpec, MuonAlgorithm, get_algorithm
-from .algorithms.base import ADAM_ALGORITHMS
+from .algorithms import AdjustLrFn, BufferSpec, MuonAlgorithm, compute_lr_ratio, get_algorithm
+from .algorithms.base import ADAM_ALGORITHMS, resolve_adjust_lr_fn
 
 
 def _register_dtensor_foreach_ops():
@@ -93,6 +92,7 @@ class Muon(torch.optim.Optimizer):
         nesterov: bool = True,
         ns_steps: int = 5,
         orthogonalization_strategy: OrthogonalizationStrategy = "polar_express",
+        adjust_lr_fn: AdjustLrFn | None = "original",
         # Adam defaults
         amsgrad: bool = False,
         adam_betas: tuple[float, float] = (0.9, 0.95),
@@ -139,8 +139,13 @@ class Muon(torch.optim.Optimizer):
             nesterov: Use Nesterov momentum for Muon
             ns_steps: Number of orthogonalization steps for Muon
             orthogonalization_strategy: Algorithm for computing zero-power/sign of gradients:
-                - "newton_schulz": Classic Newton-Schulz iteration (default)
-                - "polar_express": Polar Express algorithm (arxiv.org/pdf/2505.16932)
+                - "newton_schulz": Classic Newton-Schulz iteration
+                - "polar_express": Polar Express algorithm (arxiv.org/pdf/2505.16932) (default)
+            adjust_lr_fn: Shape-based LR scaling rule for Muon groups (``None`` maps to
+                ``"original"``):
+                - "original": ``sqrt(max(1, M / N))`` (default)
+                - "spectral_unclamped": ``sqrt(M / N)``
+                - "match_rms_adamw": ``0.2 * sqrt(max(M, N))``
             amsgrad: Use AMSGrad for Adam
             adam_betas: Beta parameters for Adam
             adam_eps: Epsilon for Adam
@@ -162,6 +167,7 @@ class Muon(torch.optim.Optimizer):
         self.nesterov = nesterov
         self.ns_steps = ns_steps
         self.orthogonalization_strategy = orthogonalization_strategy
+        self.adjust_lr_fn = resolve_adjust_lr_fn(adjust_lr_fn)
         self.amsgrad = amsgrad
         self.adam_betas = adam_betas
         self.adam_eps = adam_eps
@@ -286,6 +292,9 @@ class Muon(torch.optim.Optimizer):
             "orthogonalization_strategy": group.get(
                 "orthogonalization_strategy", self.orthogonalization_strategy
             ),
+            "adjust_lr_fn": resolve_adjust_lr_fn(
+                group.get("adjust_lr_fn", self.adjust_lr_fn)
+            ),
             "maximize": group.get("maximize", self.maximize),
             "flatten": group.get("flatten", False),
             "split_sizes": self._validate_split_sizes(group),
@@ -342,6 +351,9 @@ class Muon(torch.optim.Optimizer):
                 group.setdefault("flatten", False)
                 group.setdefault("use_cautious_wd", True)
                 group.setdefault("orthogonalization_strategy", "polar_express")
+                group["adjust_lr_fn"] = resolve_adjust_lr_fn(
+                    group.get("adjust_lr_fn", "original")
+                )
                 group.setdefault("maximize", False)
                 group.setdefault("split_sizes", None)
                 if "foreach" not in group:
@@ -426,7 +438,9 @@ class Muon(torch.optim.Optimizer):
                 for key, spec in algorithm.state_spec.items():
                     state[key] = self._new_state_buffer(p, grad, spec)
                 state["lr_ratio"] = torch.tensor(
-                    math.sqrt(max(1.0, grad.shape[-2] / grad.shape[-1]))
+                    compute_lr_ratio(
+                        grad.shape[-2], grad.shape[-1], group["adjust_lr_fn"]
+                    )
                 )
 
             state["step"] += 1
@@ -511,6 +525,7 @@ class Muon(torch.optim.Optimizer):
         orthogonalization_strategy: OrthogonalizationStrategy,
         maximize: bool,
         split_sizes: tuple[int, ...] | None = None,
+        adjust_lr_fn: AdjustLrFn = "original",
         **opts,
     ) -> None:
         """
@@ -543,6 +558,7 @@ class Muon(torch.optim.Optimizer):
                     ns_steps=ns_steps,
                     orthogonalization_strategy=orthogonalization_strategy,
                     split_sizes=split_sizes,
+                    adjust_lr_fn=adjust_lr_fn,
                     **opts,
                 )
             return
@@ -592,6 +608,7 @@ class Muon(torch.optim.Optimizer):
                     ns_steps=ns_steps,
                     orthogonalization_strategy=orthogonalization_strategy,
                     split_sizes=split_sizes,
+                    adjust_lr_fn=adjust_lr_fn,
                     **opts,
                 )
 
@@ -650,6 +667,7 @@ class Muon(torch.optim.Optimizer):
             orthogonalization_strategy=group["orthogonalization_strategy"],
             maximize=group["maximize"],
             split_sizes=group["split_sizes"],
+            adjust_lr_fn=group["adjust_lr_fn"],
             **{key: group[key] for key in algorithm.options},
         )
 

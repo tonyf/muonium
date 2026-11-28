@@ -6,8 +6,10 @@ your own variant by subclassing :class:`MuonAlgorithm` and decorating it with
 """
 
 from .base import (
+    AdjustLrFn,
     BufferSpec,
     MuonAlgorithm,
+    compute_lr_ratio,
     get_algorithm,
     orthogonalize_batch,
     orthogonalize_single,
@@ -24,6 +26,7 @@ from .normuon import NorMuon
 
 __all__ = [
     "AdamHyperball",
+    "AdjustLrFn",
     "BufferSpec",
     "Dimuon",
     "MuonAlgorithm",
@@ -32,6 +35,7 @@ __all__ = [
     "MuonHyperball",
     "NorMuon",
     "NorMuonHyperball",
+    "compute_lr_ratio",
     "get_algorithm",
     "orthogonalize_batch",
     "orthogonalize_single",

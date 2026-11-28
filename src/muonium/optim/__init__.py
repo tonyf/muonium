@@ -1,4 +1,5 @@
 from .algorithms import (
+    AdjustLrFn,
     BufferSpec,
     MuonAlgorithm,
     get_algorithm,
@@ -8,6 +9,7 @@ from .algorithms import (
 from .optim import Muon
 
 __all__ = [
+    "AdjustLrFn",
     "BufferSpec",
     "Muon",
     "MuonAlgorithm",

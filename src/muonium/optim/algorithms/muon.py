@@ -5,6 +5,7 @@ from torch import Tensor
 from muonium.orthogonalize import OrthogonalizationStrategy
 
 from .base import (
+    AdjustLrFn,
     MuonAlgorithm,
     orthogonalize_batch,
     orthogonalize_single,
@@ -38,6 +39,7 @@ class MuonBaseline(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        adjust_lr_fn: AdjustLrFn = "original",
         **opts,
     ) -> None:
         momentum_buffer = state["momentum_buffer"]
@@ -65,6 +67,7 @@ class MuonBaseline(MuonAlgorithm):
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
+            adjust_lr_fn=adjust_lr_fn,
         )
         u = u.view_as(param_fp32)
 
@@ -98,6 +101,7 @@ class MuonBaseline(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        adjust_lr_fn: AdjustLrFn = "original",
         **opts,
     ) -> None:
         """Batched Muon update. Assumes all tensors are same shape and device."""
@@ -127,6 +131,7 @@ class MuonBaseline(MuonAlgorithm):
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
+            adjust_lr_fn=adjust_lr_fn,
         )
         u = [u_.to(torch.float32).view_as(p_) for u_, p_ in zip(u, p, strict=True)]
 

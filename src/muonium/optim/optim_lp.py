@@ -16,7 +16,7 @@ from torchao.optim.subclass_fp8 import OptimStateFp8  # ty: ignore[unresolved-im
 from muonium.orthogonalize import OrthogonalizationStrategy
 from muonium.utils import to_local
 
-from .algorithms import BufferSpec
+from .algorithms import AdjustLrFn, BufferSpec
 from .optim import Muon
 
 
@@ -35,6 +35,7 @@ class MuonLP(Muon):
         nesterov: bool = True,
         ns_steps: int = 5,
         orthogonalization_strategy: OrthogonalizationStrategy = "polar_express",
+        adjust_lr_fn: AdjustLrFn | None = "original",
         # Adam defaults
         amsgrad: bool = False,
         adam_betas: tuple[float, float] = (0.9, 0.95),
@@ -62,6 +63,7 @@ class MuonLP(Muon):
             nesterov=nesterov,
             ns_steps=ns_steps,
             orthogonalization_strategy=orthogonalization_strategy,
+            adjust_lr_fn=adjust_lr_fn,
             #
             amsgrad=amsgrad,
             adam_betas=adam_betas,
