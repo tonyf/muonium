@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 import functools
 from typing import cast
 
@@ -11,7 +12,12 @@ from torch.optim.optimizer import (
     _use_grad_for_differentiable,
 )
 
-from muonium.orthogonalize import OrthogonalizationStrategy
+from muonium.orthogonalize import (
+    NsCoefficients,
+    OrthogonalizationStrategy,
+    normalize_ns_coefficients,
+)
+from muonium.orthogonalize.orthogonalize import _resolve_steps_and_coefficients
 from muonium.utils import group_tensors_by_shape, move_tensors_to_device
 
 from .algorithms import AdjustLrFn, BufferSpec, MuonAlgorithm, compute_lr_ratio, get_algorithm
@@ -90,7 +96,8 @@ class Muon(torch.optim.Optimizer):
         # Muon defaults
         momentum: float = 0.95,
         nesterov: bool = True,
-        ns_steps: int = 5,
+        ns_steps: int | None = None,
+        ns_coefficients: Sequence[Sequence[float]] | None = None,
         orthogonalization_strategy: OrthogonalizationStrategy = "polar_express",
         adjust_lr_fn: AdjustLrFn | None = "original",
         # Adam defaults
@@ -137,7 +144,14 @@ class Muon(torch.optim.Optimizer):
                 (non-cautious) decoupled weight decay.
             momentum: Muon momentum
             nesterov: Use Nesterov momentum for Muon
-            ns_steps: Number of orthogonalization steps for Muon
+            ns_steps: Number of orthogonalization steps for Muon (defaults to
+                ``len(ns_coefficients)`` when custom ``ns_coefficients`` are
+                provided, otherwise ``5``)
+            ns_coefficients: Optional custom ``(a, b, c)`` coefficient schedule
+                for orthogonalization (e.g. an 8-step Polar Express schedule).
+                A 1-entry schedule repeats for ``ns_steps`` iterations;
+                multi-entry schedules supply per-step coefficients with no
+                implicit 1.02 norm factor.
             orthogonalization_strategy: Algorithm for computing zero-power/sign of gradients:
                 - "newton_schulz": Classic Newton-Schulz iteration
                 - "polar_express": Polar Express algorithm (arxiv.org/pdf/2505.16932) (default)
@@ -165,7 +179,17 @@ class Muon(torch.optim.Optimizer):
         self.use_cautious_wd = use_cautious_wd
         self.momentum = momentum
         self.nesterov = nesterov
-        self.ns_steps = ns_steps
+        self.ns_coefficients = normalize_ns_coefficients(ns_coefficients)
+        self._ns_steps_explicit = ns_steps is not None
+        self.ns_steps = (
+            (len(self.ns_coefficients) if self.ns_coefficients is not None else 5)
+            if ns_steps is None
+            else ns_steps
+        )
+        if self.ns_coefficients is not None:
+            _resolve_steps_and_coefficients(
+                orthogonalization_strategy, self.ns_steps, self.ns_coefficients
+            )
         self.orthogonalization_strategy = orthogonalization_strategy
         self.adjust_lr_fn = resolve_adjust_lr_fn(adjust_lr_fn)
         self.amsgrad = amsgrad
@@ -279,6 +303,25 @@ class Muon(torch.optim.Optimizer):
         if foreach is None:
             foreach = all(p.is_cuda for p in group["params"])
 
+        strategy = group.get(
+            "orthogonalization_strategy", self.orthogonalization_strategy
+        )
+        ns_coefficients = normalize_ns_coefficients(
+            group.get("ns_coefficients", self.ns_coefficients)
+        )
+        if "ns_steps" in group:
+            ns_steps = group["ns_steps"]
+        elif (
+            "ns_coefficients" in group
+            and ns_coefficients is not None
+            and not self._ns_steps_explicit
+        ):
+            ns_steps = len(ns_coefficients)
+        else:
+            ns_steps = self.ns_steps
+        if ns_coefficients is not None:
+            _resolve_steps_and_coefficients(strategy, ns_steps, ns_coefficients)
+
         built = {
             "params": group["params"],
             "algorithm": algorithm.name,
@@ -288,10 +331,9 @@ class Muon(torch.optim.Optimizer):
             "use_cautious_wd": group.get("use_cautious_wd", self.use_cautious_wd),
             "momentum": group.get("momentum", self.momentum),
             "nesterov": group.get("nesterov", self.nesterov),
-            "ns_steps": group.get("ns_steps", self.ns_steps),
-            "orthogonalization_strategy": group.get(
-                "orthogonalization_strategy", self.orthogonalization_strategy
-            ),
+            "ns_steps": ns_steps,
+            "ns_coefficients": ns_coefficients,
+            "orthogonalization_strategy": strategy,
             "adjust_lr_fn": resolve_adjust_lr_fn(
                 group.get("adjust_lr_fn", self.adjust_lr_fn)
             ),
@@ -346,7 +388,15 @@ class Muon(torch.optim.Optimizer):
             if group["use_muon"]:
                 group.setdefault("algorithm", "muon")
                 algorithm = get_algorithm(group["algorithm"])
-                group.setdefault("ns_steps", 5)
+                group["ns_coefficients"] = normalize_ns_coefficients(
+                    group.get("ns_coefficients")
+                )
+                group.setdefault(
+                    "ns_steps",
+                    len(group["ns_coefficients"])
+                    if group["ns_coefficients"] is not None
+                    else 5,
+                )
                 group.setdefault("nesterov", True)
                 group.setdefault("flatten", False)
                 group.setdefault("use_cautious_wd", True)
@@ -526,6 +576,7 @@ class Muon(torch.optim.Optimizer):
         maximize: bool,
         split_sizes: tuple[int, ...] | None = None,
         adjust_lr_fn: AdjustLrFn = "original",
+        ns_coefficients: NsCoefficients | None = None,
         **opts,
     ) -> None:
         """
@@ -559,6 +610,7 @@ class Muon(torch.optim.Optimizer):
                     orthogonalization_strategy=orthogonalization_strategy,
                     split_sizes=split_sizes,
                     adjust_lr_fn=adjust_lr_fn,
+                    ns_coefficients=ns_coefficients,
                     **opts,
                 )
             return
@@ -609,6 +661,7 @@ class Muon(torch.optim.Optimizer):
                     orthogonalization_strategy=orthogonalization_strategy,
                     split_sizes=split_sizes,
                     adjust_lr_fn=adjust_lr_fn,
+                    ns_coefficients=ns_coefficients,
                     **opts,
                 )
 
@@ -664,6 +717,7 @@ class Muon(torch.optim.Optimizer):
             cautious_wd=group["use_cautious_wd"],
             momentum=group["momentum"],
             ns_steps=group["ns_steps"],
+            ns_coefficients=group["ns_coefficients"],
             orthogonalization_strategy=group["orthogonalization_strategy"],
             maximize=group["maximize"],
             split_sizes=group["split_sizes"],

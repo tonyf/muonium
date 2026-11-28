@@ -11,7 +11,7 @@ only; embeddings, norm gains and scalars stay on plain Adam.
 import torch
 from torch import Tensor
 
-from muonium.orthogonalize import OrthogonalizationStrategy
+from muonium.orthogonalize import NsCoefficients, OrthogonalizationStrategy
 
 from .base import (
     BufferSpec,
@@ -119,6 +119,7 @@ class MuonHyperball(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        ns_coefficients: NsCoefficients | None = None,
         **opts,
     ) -> None:
         momentum_buffer = state["momentum_buffer"]
@@ -141,6 +142,7 @@ class MuonHyperball(MuonAlgorithm):
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
             apply_lr_scales=False,
+            ns_coefficients=ns_coefficients,
         )
         u = self.direction(u, state, split_sizes, **opts)
         p = param.to(torch.float32).view_as(grad)
@@ -162,6 +164,7 @@ class MuonHyperball(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        ns_coefficients: NsCoefficients | None = None,
         **opts,
     ) -> None:
         """Batched MuonH update. Assumes all tensors are same shape and device."""
@@ -185,6 +188,7 @@ class MuonHyperball(MuonAlgorithm):
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
             apply_lr_scales=False,
+            ns_coefficients=ns_coefficients,
         )
 
         # Per tensor, like NorMuon's normalization: a few reductions that compile

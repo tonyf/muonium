@@ -816,3 +816,58 @@ def test_adjust_lr_fn_per_group_override_and_validation(monkeypatch):
         Muon([torch.nn.Parameter(torch.randn(4, 4))], adjust_lr_fn="bogus")  # ty: ignore[invalid-argument-type]
     with pytest.raises(ValueError, match="Unknown adjust_lr_fn"):
         Muon([{"params": [torch.nn.Parameter(torch.randn(4, 4))], "adjust_lr_fn": "bogus"}])
+
+
+def test_ns_coefficients_configuration_and_step() -> None:
+    torch.manual_seed(0)
+    ns_triple = (3.4445, -4.7750, 2.0315)
+    eight_step = (ns_triple,) * 8
+
+    # Omitting ns_steps defaults to len(ns_coefficients); matches 8-step newton_schulz.
+    p_custom = torch.nn.Parameter(torch.randn(16, 8))
+    p_ref = torch.nn.Parameter(p_custom.detach().clone())
+    grad = torch.randn_like(p_custom)
+    p_custom.grad = grad.clone()
+    p_ref.grad = grad.clone()
+
+    opt_custom = Muon(
+        [p_custom],
+        lr=0.05,
+        wd=0.0,
+        momentum=0.0,
+        nesterov=False,
+        orthogonalization_strategy="newton_schulz",
+        ns_coefficients=eight_step,
+    )
+    opt_ref = Muon(
+        [p_ref],
+        lr=0.05,
+        wd=0.0,
+        momentum=0.0,
+        nesterov=False,
+        orthogonalization_strategy="newton_schulz",
+        ns_steps=8,
+    )
+    assert opt_custom.ns_steps == 8
+    assert opt_custom.param_groups[0]["ns_steps"] == 8
+    assert opt_custom.param_groups[0]["ns_coefficients"] == eight_step
+
+    opt_custom.step()
+    opt_ref.step()
+    torch.testing.assert_close(p_custom, p_ref, rtol=1e-5, atol=1e-6)
+
+    # Per-group override defaults ns_steps to len(group["ns_coefficients"]).
+    p_g = torch.nn.Parameter(torch.randn(8, 8))
+    opt_group = Muon([{"params": [p_g], "ns_coefficients": eight_step}])
+    assert opt_group.param_groups[0]["ns_steps"] == 8
+
+    # Rejects ns_steps > len(ns_coefficients) at construction.
+    with pytest.raises(ValueError, match="exceeds length"):
+        Muon([p_g], ns_steps=10, ns_coefficients=eight_step)
+
+    # __setstate__ normalizes list-of-lists from serialized checkpoints back to tuples.
+    opt_custom.param_groups[0]["ns_coefficients"] = [list(c) for c in eight_step]
+    opt_custom.__setstate__(
+        {"state": opt_custom.state, "param_groups": opt_custom.param_groups}
+    )
+    assert opt_custom.param_groups[0]["ns_coefficients"] == eight_step

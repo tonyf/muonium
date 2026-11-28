@@ -33,17 +33,23 @@ def pe_loop(
     steps: int = 5,
     *,
     eps: float = 1e-6,
+    coefficients: tuple[tuple[float, float, float], ...] | None = None,
+    norm_factor: float = 1.02,
 ) -> Annotated[Tensor, "B N M"]:
     """
-    Polar Express orthogonalization algorithm.
+    Polar Express (or custom-schedule) orthogonalization algorithm.
 
-    Computes the matrix sign function (zero-power) using a specialized
-    iteration scheme with precomputed coefficients for fast convergence.
+    Computes the matrix sign function (zero-power) using a per-step
+    coefficient schedule ``(a, b, c)``.
 
     Args:
         X: Input tensor of shape (B, N, M) where B is batch size
-        steps: Number of iteration steps (max 5, limited by POLAR_EXPRESS_COEFFS)
+        steps: Number of iteration steps
         eps: Small constant for numerical stability
+        coefficients: Optional per-step ``(a, b, c)`` schedule; defaults to
+            ``POLAR_EXPRESS_COEFFS``
+        norm_factor: Pre-iteration safety divisor on the Frobenius norm
+            (``1.02`` for built-in Polar Express; ``1.0`` for custom schedules)
 
     Returns:
         Orthogonalized tensor of same shape as input
@@ -55,9 +61,13 @@ def pe_loop(
     if transpose:
         X = X.transpose(-2, -1)
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02).clamp_min(eps)
+    denom = X.norm(dim=(-2, -1), keepdim=True)
+    if norm_factor != 1.0:
+        denom = denom * norm_factor
+    X = X / denom.clamp_min(eps)
 
-    for a, b, c in POLAR_EXPRESS_COEFFS[:steps]:
+    schedule = POLAR_EXPRESS_COEFFS if coefficients is None else coefficients
+    for a, b, c in schedule[:steps]:
         A = torch.matmul(X, X.transpose(-1, -2))
         B = _fused_addmm(A, A, A, beta=b, alpha=c)
         X = _fused_addmm(X, B, X, beta=a)
@@ -74,9 +84,11 @@ def pe_loop_triton(
     steps: int = 5,
     *,
     eps: float = 1e-6,
+    coefficients: tuple[tuple[float, float, float], ...] | None = None,
+    norm_factor: float = 1.02,
 ) -> Tensor:
     """
-    Polar Express orthogonalization algorithm.
+    Polar Express (or custom-schedule) orthogonalization algorithm using Triton ``gram_``.
     """
     assert X.ndim >= 2
     if X.size(0) == 0:
@@ -88,14 +100,18 @@ def pe_loop_triton(
         # not copy X on every iteration and B @ X sees contiguous operands.
         X = X.mT.contiguous()
 
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.02).clamp_min(eps)
+    denom = X.norm(dim=(-2, -1), keepdim=True)
+    if norm_factor != 1.0:
+        denom = denom * norm_factor
+    X = X / denom.clamp_min(eps)
 
     M = X.size(-2)
     buf_shape = (*X.shape[:-2], M, M)
     A = torch.empty(buf_shape, dtype=X.dtype, device=X.device)
     B = torch.empty_like(A)
 
-    for a, b, c in POLAR_EXPRESS_COEFFS[:steps]:
+    schedule = POLAR_EXPRESS_COEFFS if coefficients is None else coefficients
+    for a, b, c in schedule[:steps]:
         # A = X X^T
         gram_(X, A)
 

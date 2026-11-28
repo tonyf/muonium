@@ -9,6 +9,7 @@ from torch import Tensor
 from torch.distributed.tensor import DTensor, Replicate
 
 from muonium.orthogonalize import (
+    NsCoefficients,
     OrthogonalizationStrategy,
     foreach_zeropower,
     foreach_zeropower_3d_fsdp,
@@ -31,6 +32,7 @@ RESERVED_GROUP_KEYS = frozenset(
         "momentum",
         "nesterov",
         "ns_steps",
+        "ns_coefficients",
         "orthogonalization_strategy",
         "adjust_lr_fn",
         "maximize",
@@ -117,6 +119,7 @@ def _split_orthogonalize_full(
     *,
     ns_steps: int,
     strategy: OrthogonalizationStrategy,
+    ns_coefficients: NsCoefficients | None = None,
 ) -> Tensor:
     """Orthogonalize row blocks of a regular (non-DTensor) 2D tensor independently.
 
@@ -132,7 +135,10 @@ def _split_orthogonalize_full(
     out: list[Tensor | None] = [None] * len(blocks)
     for indices in by_height.values():
         ortho = foreach_zeropower(
-            [blocks[i] for i in indices], steps=ns_steps, strategy=strategy
+            [blocks[i] for i in indices],
+            steps=ns_steps,
+            strategy=strategy,
+            coefficients=ns_coefficients,
         )
         for i, u in zip(indices, ortho, strict=True):
             out[i] = u * scales[i] if scales is not None else u
@@ -147,6 +153,7 @@ def orthogonalize_single(
     split_sizes: tuple[int, ...] | None = None,
     apply_lr_scales: bool = True,
     adjust_lr_fn: AdjustLrFn = "original",
+    ns_coefficients: NsCoefficients | None = None,
 ):
     """Orthogonalize one tensor. DTensor handling lives inside ``zeropower``.
 
@@ -158,7 +165,7 @@ def orthogonalize_single(
     placements) so any sharding is supported.
     """
     if split_sizes is None:
-        return zeropower(g, steps=ns_steps, strategy=strategy)
+        return zeropower(g, steps=ns_steps, strategy=strategy, coefficients=ns_coefficients)
 
     scales = (
         split_lr_scales(g.shape, split_sizes, adjust_lr_fn) if apply_lr_scales else None
@@ -170,6 +177,7 @@ def orthogonalize_single(
             scales,
             ns_steps=ns_steps,
             strategy=strategy,
+            ns_coefficients=ns_coefficients,
         )
         u_replicated = DTensor.from_local(
             u,
@@ -178,7 +186,12 @@ def orthogonalize_single(
         )
         return u_replicated.redistribute(placements=g.placements, async_op=True)
     return _split_orthogonalize_full(
-        g, split_sizes, scales, ns_steps=ns_steps, strategy=strategy
+        g,
+        split_sizes,
+        scales,
+        ns_steps=ns_steps,
+        strategy=strategy,
+        ns_coefficients=ns_coefficients,
     )
 
 
@@ -190,6 +203,7 @@ def orthogonalize_batch(
     split_sizes: tuple[int, ...] | None = None,
     apply_lr_scales: bool = True,
     adjust_lr_fn: AdjustLrFn = "original",
+    ns_coefficients: NsCoefficients | None = None,
 ) -> list[Tensor]:
     """Orthogonalize a same-shape batch, preferring the FSDP local-shard fast path.
 
@@ -208,6 +222,7 @@ def orthogonalize_batch(
                     split_sizes=split_sizes,
                     apply_lr_scales=apply_lr_scales,
                     adjust_lr_fn=adjust_lr_fn,
+                    ns_coefficients=ns_coefficients,
                 )
                 for g in gs
             ]
@@ -228,6 +243,7 @@ def orthogonalize_batch(
                 [all_blocks[layer_idx][block_idx] for layer_idx, block_idx in pairs],
                 steps=ns_steps,
                 strategy=strategy,
+                coefficients=ns_coefficients,
             )
             for (layer_idx, block_idx), u in zip(pairs, ortho, strict=True):
                 out[layer_idx][block_idx] = (
@@ -239,9 +255,19 @@ def orthogonalize_batch(
     if is_fsdp_3d_sharded(gs):
         return cast(
             list[Tensor],
-            foreach_zeropower_3d_fsdp(gs, steps=ns_steps, strategy=strategy),  # ty: ignore
+            foreach_zeropower_3d_fsdp(
+                gs,  # ty: ignore
+                steps=ns_steps,
+                strategy=strategy,
+                coefficients=ns_coefficients,
+            ),
         )
-    return cast(list[Tensor], foreach_zeropower(gs, steps=ns_steps, strategy=strategy))
+    return cast(
+        list[Tensor],
+        foreach_zeropower(
+            gs, steps=ns_steps, strategy=strategy, coefficients=ns_coefficients
+        ),
+    )
 
 
 class MuonAlgorithm(ABC):
@@ -298,6 +324,7 @@ class MuonAlgorithm(ABC):
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
         adjust_lr_fn: AdjustLrFn = "original",
+        ns_coefficients: NsCoefficients | None = None,
         **opts,
     ) -> None:
         """Per-tensor fp32 reference update; mutates ``param`` and ``state`` in place.
@@ -323,6 +350,7 @@ class MuonAlgorithm(ABC):
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
         adjust_lr_fn: AdjustLrFn = "original",
+        ns_coefficients: NsCoefficients | None = None,
         **opts,
     ) -> None:
         """Batched update over same-(device, dtype, shape) tensors.
@@ -348,6 +376,7 @@ class MuonAlgorithm(ABC):
                 orthogonalization_strategy=orthogonalization_strategy,
                 split_sizes=split_sizes,
                 adjust_lr_fn=adjust_lr_fn,
+                ns_coefficients=ns_coefficients,
                 **opts,
             )
 

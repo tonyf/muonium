@@ -13,7 +13,7 @@ import math
 import torch
 from torch import Tensor
 
-from muonium.orthogonalize import OrthogonalizationStrategy
+from muonium.orthogonalize import NsCoefficients, OrthogonalizationStrategy
 
 from .base import (
     MuonAlgorithm,
@@ -58,6 +58,7 @@ def _dimuon_direction(
     ns_steps: int,
     strategy: OrthogonalizationStrategy,
     split_sizes: tuple[int, ...] | None = None,
+    ns_coefficients: NsCoefficients | None = None,
 ) -> Tensor:
     """Per-tensor Dimuon update direction (before ``lr`` and weight decay).
 
@@ -67,7 +68,14 @@ def _dimuon_direction(
     if split_sizes is not None:
         return torch.cat(
             [
-                _dimuon_direction(o, m, damping, ns_steps=ns_steps, strategy=strategy)
+                _dimuon_direction(
+                    o,
+                    m,
+                    damping,
+                    ns_steps=ns_steps,
+                    strategy=strategy,
+                    ns_coefficients=ns_coefficients,
+                )
                 for o, m in zip(
                     old.split(list(split_sizes), dim=-2),
                     m_new.split(list(split_sizes), dim=-2),
@@ -77,7 +85,12 @@ def _dimuon_direction(
             dim=-2,
         )
     left, right = _dimuon_conditioners(old, damping)
-    u = orthogonalize_single(left * m_new * right, ns_steps=ns_steps, strategy=strategy)
+    u = orthogonalize_single(
+        left * m_new * right,
+        ns_steps=ns_steps,
+        strategy=strategy,
+        ns_coefficients=ns_coefficients,
+    )
     return _dimuon_scale(u, left, right)
 
 
@@ -122,6 +135,7 @@ class Dimuon(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        ns_coefficients: NsCoefficients | None = None,
         dimuon_damping: float = 1e-4,
         **opts,
     ) -> None:
@@ -140,6 +154,7 @@ class Dimuon(MuonAlgorithm):
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
+            ns_coefficients=ns_coefficients,
         )
         momentum_buffer.copy_(m_new)
         _apply(param, d, lr, weight_decay, cautious_wd)
@@ -160,6 +175,7 @@ class Dimuon(MuonAlgorithm):
         ns_steps: int,
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
+        ns_coefficients: NsCoefficients | None = None,
         dimuon_damping: float = 1e-4,
         **opts,
     ) -> None:
@@ -180,6 +196,7 @@ class Dimuon(MuonAlgorithm):
                 ns_steps=ns_steps,
                 orthogonalization_strategy=orthogonalization_strategy,
                 split_sizes=split_sizes,
+                ns_coefficients=ns_coefficients,
                 dimuon_damping=dimuon_damping,
                 **opts,
             )
@@ -197,6 +214,7 @@ class Dimuon(MuonAlgorithm):
             [left * b * right for b, (left, right) in zip(buf, conds, strict=True)],
             ns_steps=ns_steps,
             strategy=orthogonalization_strategy,
+            ns_coefficients=ns_coefficients,
         )
 
         # Per tensor, like NorMuon's normalization: a few reductions that compile

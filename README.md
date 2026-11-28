@@ -109,7 +109,8 @@ supported.
 | `use_cautious_wd` | `True` | Apply decay only where update and param share a sign; `False` for plain decay. |
 | `momentum` | `0.95` | Muon momentum. |
 | `nesterov` | `True` | Use Nesterov momentum. |
-| `ns_steps` | `5` | Orthogonalization iteration steps. |
+| `ns_steps` | `5` (or `len(ns_coefficients)`) | Orthogonalization iteration steps. |
+| `ns_coefficients` | `None` | Optional custom `(a, b, c)` coefficient schedule (supports >5 steps, e.g. 8-step Polar Express; no implicit `1.02` norm factor). |
 | `orthogonalization_strategy` | `"polar_express"` | `"newton_schulz"` or `"polar_express"`. |
 | `adjust_lr_fn` | `"original"` | Shape-based LR scaling for Muon groups: `"original"` (`sqrt(max(1, M/N))`), `"spectral_unclamped"` (`sqrt(M/N)`), or `"match_rms_adamw"` (`0.2 * sqrt(max(M, N))`). `None` maps to `"original"`. |
 | `adam_betas` | `(0.9, 0.95)` | Betas for the Adam path. |

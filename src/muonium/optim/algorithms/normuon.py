@@ -2,7 +2,7 @@
 import torch
 from torch import Tensor
 
-from muonium.orthogonalize import OrthogonalizationStrategy
+from muonium.orthogonalize import NsCoefficients, OrthogonalizationStrategy
 
 from .base import (
     AdjustLrFn,
@@ -116,6 +116,7 @@ class NorMuon(MuonAlgorithm):
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
         adjust_lr_fn: AdjustLrFn = "original",
+        ns_coefficients: NsCoefficients | None = None,
         muon_beta2: float = 0.95,
         **opts,
     ) -> None:
@@ -143,6 +144,7 @@ class NorMuon(MuonAlgorithm):
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
             apply_lr_scales=False,
+            ns_coefficients=ns_coefficients,
         )
 
         # Neuron-wise normalization on the unscaled grad-shaped update, so rows
@@ -183,6 +185,7 @@ class NorMuon(MuonAlgorithm):
         orthogonalization_strategy: OrthogonalizationStrategy,
         split_sizes: tuple[int, ...] | None,
         adjust_lr_fn: AdjustLrFn = "original",
+        ns_coefficients: NsCoefficients | None = None,
         muon_beta2: float = 0.95,
         **opts,
     ) -> None:
@@ -213,6 +216,7 @@ class NorMuon(MuonAlgorithm):
             strategy=orthogonalization_strategy,
             split_sizes=split_sizes,
             apply_lr_scales=False,
+            ns_coefficients=ns_coefficients,
         )
 
         # Normalization runs per tensor: it is a handful of reductions that

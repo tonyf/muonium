@@ -205,3 +205,37 @@ def test_pe_vanishing_norm_uses_clamp_min_without_shrinkage() -> None:
     out_small = eager(pe_loop)(X, 5, eps=1e-6)
     out_unit = eager(pe_loop)(X * 1e5, 5, eps=1e-6)
     torch.testing.assert_close(out_small, out_unit, rtol=1e-5, atol=1e-6)
+
+
+def test_pe_custom_schedule_supports_more_than_five_steps_and_no_102_factor() -> None:
+    torch.manual_seed(10)
+    X = torch.randn(32, 16, dtype=torch.float32)
+    # 8-step constant NS schedule with norm_factor=1.0 should match 8-step ns_loop.
+    eight_step = ((3.4445, -4.7750, 2.0315),) * 8
+    out = eager(pe_loop)(X, 8, eps=1e-7, coefficients=eight_step, norm_factor=1.0)
+    from muonium.orthogonalize.newton_schulz import ns_loop
+
+    ref = eager(ns_loop)(X, 8, eps=1e-7)
+    torch.testing.assert_close(out, ref, rtol=1e-6, atol=1e-6)
+
+
+@requires_cuda
+def test_pe_triton_custom_eight_step_schedule_matches_torch() -> None:
+    torch.manual_seed(11)
+    X = torch.randn(4, 128, 64, device="cuda", dtype=torch.bfloat16)
+    eight_step = POLAR_EXPRESS_COEFFS + POLAR_EXPRESS_COEFFS[-3:]
+    out_triton = pe_loop_triton(
+        X, 8, eps=1e-6, coefficients=eight_step, norm_factor=1.0
+    )
+    out_torch = eager(pe_loop)(
+        X, 8, eps=1e-6, coefficients=eight_step, norm_factor=1.0
+    )
+    from testkit import assert_close
+
+    assert_close(
+        out_triton.float(),
+        out_torch.float(),
+        rtol=RTOL,
+        atol=ATOL,
+        max_mismatch_pct=MAX_MISMATCH_PCT,
+    )

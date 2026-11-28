@@ -4,6 +4,7 @@ try:
 except ImportError:
     raise ImportError("Please install `torchao` package to use low-precision optimizers")
 
+from collections.abc import Sequence
 import warnings
 
 import torch
@@ -33,7 +34,8 @@ class MuonLP(Muon):
         # Muon defaults
         momentum: float = 0.95,
         nesterov: bool = True,
-        ns_steps: int = 5,
+        ns_steps: int | None = None,
+        ns_coefficients: Sequence[Sequence[float]] | None = None,
         orthogonalization_strategy: OrthogonalizationStrategy = "polar_express",
         adjust_lr_fn: AdjustLrFn | None = "original",
         # Adam defaults
@@ -62,6 +64,7 @@ class MuonLP(Muon):
             momentum=momentum,
             nesterov=nesterov,
             ns_steps=ns_steps,
+            ns_coefficients=ns_coefficients,
             orthogonalization_strategy=orthogonalization_strategy,
             adjust_lr_fn=adjust_lr_fn,
             #

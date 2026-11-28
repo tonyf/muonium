@@ -300,3 +300,51 @@ def test_foreach_zeropower_triton_matches_torch(strategy: OrthogonalizationStrat
         max_mismatch_pct=MAX_MISMATCH_PCT,
         benchmark=False,
     )
+
+
+def test_zeropower_custom_coefficients_eight_steps_and_single_repeat() -> None:
+    torch.manual_seed(12)
+    G = torch.randn(32, 16, dtype=torch.float32)
+    ns_triple = (3.4445, -4.7750, 2.0315)
+    eight_step = (ns_triple,) * 8
+
+    # 8-step custom schedule lifts the 5-step PE cap and defaults steps=len(coefficients).
+    out_pe = zeropower(
+        G, use_triton=False, strategy="polar_express", coefficients=eight_step, eps=1e-7
+    )
+    ref_ns = zeropower(G, steps=8, use_triton=False, strategy="newton_schulz", eps=1e-7)
+    torch.testing.assert_close(out_pe, ref_ns, rtol=0, atol=0)
+
+    # Single-entry schedule repeats for `steps` iterations.
+    out_repeat = zeropower(
+        G, steps=6, use_triton=False, strategy="polar_express", coefficients=[ns_triple], eps=1e-7
+    )
+    ref_6 = zeropower(G, steps=6, use_triton=False, strategy="newton_schulz", eps=1e-7)
+    torch.testing.assert_close(out_repeat, ref_6, rtol=0, atol=0)
+
+    # foreach_zeropower forwards custom coefficients too.
+    outs_batch = foreach_zeropower(
+        [G, G * 2.0],
+        use_triton=False,
+        strategy="polar_express",
+        coefficients=eight_step,
+        eps=1e-7,
+    )
+    assert len(outs_batch) == 2
+    assert outs_batch[0].shape == G.shape
+
+
+@pytest.mark.parametrize(
+    ("coeffs", "steps", "match"),
+    [
+        ([], None, "non-empty"),
+        ([(1.0, 2.0)], None, "3-tuple"),
+        ([(1.0, float("nan"), 0.0)], None, "finite"),
+        ([(True, 1.0, 0.0)], None, "finite"),
+        ([(1.0, 2.0, 3.0), (1.0, 2.0, 3.0)], 3, "exceeds length"),
+    ],
+)
+def test_zeropower_invalid_coefficients_raise(coeffs, steps, match: str) -> None:
+    G = torch.randn(8, 4)
+    with pytest.raises(ValueError, match=match):
+        zeropower(G, steps=steps, use_triton=False, coefficients=coeffs)

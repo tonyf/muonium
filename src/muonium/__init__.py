@@ -9,13 +9,14 @@ from .optim import (
     register_muon_algorithm,
     registered_algorithms,
 )
-from .orthogonalize import OrthogonalizationStrategy
+from .orthogonalize import NsCoefficients, OrthogonalizationStrategy
 
 __all__ = [
     "AdjustLrFn",
     "BufferSpec",
     "Muon",
     "MuonAlgorithm",
+    "NsCoefficients",
     "OrthogonalizationStrategy",
     "get_algorithm",
     "register_muon_algorithm",
