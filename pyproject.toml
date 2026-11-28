@@ -1,6 +1,6 @@
 [project]
 name = "muonium"
-version = "0.3.1"
+version = "0.4.0"
 description = "A performant, distributed-ready base for Muon optimizer research, built on PyTorch DTensor"
 readme = "README.md"
 authors = [
